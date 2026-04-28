@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Unitree Go2 Map Viewer (WebGL)</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.5);
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      code {
+        background: rgba(255, 255, 255, 0.2);
+        padding: 2px 4px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div><strong>Unitree Go2 Viewer</strong> (WebGL)</div>
+      <div>Config: <code>config/go2_map.json</code></div>
+      <div>Orbit: 左ドラッグ / Zoom: ホイール</div>
+    </div>
+    <script type="module" src="./viewer.js"></script>
+  </body>
+</html>
