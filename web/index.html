@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Unitree Go2 Tactical Viewer</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05070b;
+        --panel: rgba(10, 14, 22, 0.82);
+        --panel-border: rgba(255, 255, 255, 0.08);
+        --text: #f4f7fb;
+        --muted: #8d98aa;
+        --accent: #ff7a1a;
+        --accent-soft: rgba(255, 122, 26, 0.18);
+      }
+
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(255, 122, 26, 0.2), transparent 30%),
+          linear-gradient(160deg, #020409 0%, #0c111a 48%, #05070b 100%);
+        color: var(--text);
+      }
+
+      #hud {
+        position: fixed;
+        top: 18px;
+        left: 18px;
+        z-index: 1;
+        width: min(340px, calc(100vw - 36px));
+        padding: 16px 18px;
+        border: 1px solid var(--panel-border);
+        border-radius: 18px;
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .eyebrow {
+        display: inline-block;
+        margin-bottom: 8px;
+        padding: 2px 10px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #ffb176;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .specs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .spec {
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .spec-label {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .spec-value {
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .controls {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        color: #c9d2df;
+      }
+
+      .planner {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .planner-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      button {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 122, 26, 0.38);
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button.is-active {
+        background: rgba(255, 122, 26, 0.16);
+        border-color: rgba(255, 122, 26, 0.48);
+        color: #ffd9bd;
+      }
+
+      .planner-status {
+        margin-top: 10px;
+        color: #d8e0eb;
+      }
+
+      code {
+        background: rgba(255, 255, 255, 0.08);
+        padding: 2px 6px;
+        border-radius: 999px;
+        color: #fff2e7;
+      }
+
+      strong {
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div class="eyebrow">Unitree Mobility Stack</div>
+      <h1>Go2 Tactical Viewer</h1>
+      <p>A compact 3D field viewer with a darker, sharper Go2-inspired control-room feel.</p>
+      <div class="specs">
+        <div class="spec">
+          <span class="spec-label">Platform</span>
+          <span class="spec-value">Unitree Go2</span>
+        </div>
+        <div class="spec">
+          <span class="spec-label">Render</span>
+          <span class="spec-value" data-role="render">WebGL 3D</span>
+        </div>
+        <div class="spec">
+          <span class="spec-label">Map Size</span>
+          <span class="spec-value" data-role="map">10m x 8m</span>
+        </div>
+        <div class="spec">
+          <span class="spec-label">Pose</span>
+          <span class="spec-value" data-role="pose">x 3.5 / y 2 / yaw 45deg</span>
+        </div>
+      </div>
+      <div class="controls">
+        <strong>Controls</strong><br />
+        Drag orbit / Wheel zoom / WASD move / Left-Right turn / Ctrl sprint / Shift sneak / Space jump
+      </div>
+      <div class="planner">
+        <strong>Auto Nav</strong>
+        <div class="planner-actions">
+          <button id="set-start-btn" type="button">Set Start</button>
+          <button id="set-goal-btn" type="button">Set Goal</button>
+          <button id="plan-path-btn" type="button">Plan Path</button>
+          <button id="auto-nav-btn" type="button">Start Auto</button>
+        </div>
+        <div class="planner-status" data-role="planner-status">Select start and goal points.</div>
+      </div>
+    </div>
+    <script type="module" src="./viewer.js"></script>
+  </body>
+</html>
