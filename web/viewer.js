@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 
 const defaultConfig = {
   map: { width_m: 10.0, height_m: 8.0 },
@@ -26,6 +27,10 @@ const urdfBasisInverse = urdfBasis.clone().invert();
 const hipMeshCorrection = new THREE.Quaternion().setFromAxisAngle(
   new THREE.Vector3(1, 0, 0),
   Math.PI * 1.5
+);
+const turtlebotBaseMeshCorrection = new THREE.Quaternion().setFromAxisAngle(
+  new THREE.Vector3(1, 0, 0),
+  Math.PI / 2
 );
 
 const go2Spec = {
@@ -84,6 +89,15 @@ const go2Spec = {
       phase: 0,
     },
   },
+};
+
+const turtlebot3Spec = {
+  name: "TurtleBot3 Burger",
+  footprintRadius: 0.12,
+  stepHeight: 0.04,
+  canJump: false,
+  wheelRadius: 0.033,
+  wheelSeparation: 0.16,
 };
 
 async function loadConfig() {
@@ -322,6 +336,28 @@ async function loadGo2Assets() {
   return assets;
 }
 
+function loadStlGeometry(loader, url) {
+  return new Promise((resolve, reject) => {
+    loader.load(url, resolve, undefined, reject);
+  });
+}
+
+async function loadTurtlebot3Assets() {
+  const loader = new STLLoader();
+  const paths = {
+    base: "./assets/turtlebot3/burger_base.stl",
+    leftWheel: "./assets/turtlebot3/left_tire.stl",
+    rightWheel: "./assets/turtlebot3/right_tire.stl",
+    lidar: "./assets/turtlebot3/lds.stl",
+  };
+
+  const entries = await Promise.all(
+    Object.entries(paths).map(async ([key, path]) => [key, await loadStlGeometry(loader, path)])
+  );
+
+  return Object.fromEntries(entries);
+}
+
 function cloneAsset(asset) {
   const clone = asset.clone(true);
   configureMeshTree(clone);
@@ -385,6 +421,113 @@ function createFallbackBody() {
   group.add(accent);
 
   return group;
+}
+
+function createTurtlebotMesh(geometry, material, scale = 0.001) {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.scale.setScalar(scale);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function applyUrdfQuaternion(object, r, p, y) {
+  object.quaternion.copy(urdfEulerToThree(r, p, y));
+}
+
+function createTurtlebot3Model(assets) {
+  const root = new THREE.Group();
+  const baseFrame = new THREE.Group();
+  baseFrame.position.copy(urdfVectorToThree(0, 0, 0.01));
+  root.add(baseFrame);
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4c525b,
+    roughness: 0.58,
+    metalness: 0.18,
+  });
+  const wheelMaterial = new THREE.MeshStandardMaterial({
+    color: 0x1f2329,
+    roughness: 0.88,
+    metalness: 0.08,
+  });
+  const lidarMaterial = new THREE.MeshStandardMaterial({
+    color: 0x2f343d,
+    roughness: 0.42,
+    metalness: 0.25,
+  });
+
+  if (assets?.base) {
+    const base = createTurtlebotMesh(assets.base, bodyMaterial);
+    base.position.copy(urdfVectorToThree(-0.032, 0, 0));
+    applyUrdfQuaternion(base, 0, 0, 0);
+    base.quaternion.multiply(turtlebotBaseMeshCorrection);
+    baseFrame.add(base);
+  } else {
+    const fallback = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.09, 0.09, 0.12, 28),
+      bodyMaterial
+    );
+    fallback.castShadow = true;
+    fallback.receiveShadow = true;
+    fallback.position.y = 0.06;
+    baseFrame.add(fallback);
+  }
+
+  const wheelLeftPivot = new THREE.Group();
+  wheelLeftPivot.position.copy(urdfVectorToThree(0, 0.08, 0.023));
+  applyUrdfQuaternion(wheelLeftPivot, -1.57, 0, 0);
+  baseFrame.add(wheelLeftPivot);
+
+  const wheelRightPivot = new THREE.Group();
+  wheelRightPivot.position.copy(urdfVectorToThree(0, -0.08, 0.023));
+  applyUrdfQuaternion(wheelRightPivot, -1.57, 0, 0);
+  baseFrame.add(wheelRightPivot);
+
+  if (assets?.leftWheel) {
+    const leftWheel = createTurtlebotMesh(assets.leftWheel, wheelMaterial);
+    wheelLeftPivot.add(leftWheel);
+  }
+
+  if (assets?.rightWheel) {
+    const rightWheel = createTurtlebotMesh(assets.rightWheel, wheelMaterial);
+    wheelRightPivot.add(rightWheel);
+  }
+
+  const caster = new THREE.Mesh(
+    new THREE.BoxGeometry(0.03, 0.02, 0.009),
+    new THREE.MeshStandardMaterial({
+      color: 0x3c4048,
+      roughness: 0.9,
+      metalness: 0.08,
+    })
+  );
+  caster.position.copy(urdfVectorToThree(-0.081, 0, -0.004));
+  caster.castShadow = true;
+  caster.receiveShadow = true;
+  baseFrame.add(caster);
+
+  if (assets?.lidar) {
+    const lidar = createTurtlebotMesh(assets.lidar, lidarMaterial);
+    lidar.position.copy(urdfVectorToThree(-0.032, 0, 0.172));
+    applyUrdfQuaternion(lidar, 0, 0, 0);
+    baseFrame.add(lidar);
+  }
+
+  const heading = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0),
+    new THREE.Vector3(0, 0.06, 0),
+    0.22,
+    0x7ed0ff,
+    0.08,
+    0.04
+  );
+  root.add(heading);
+
+  return {
+    root,
+    wheelLeftPivot,
+    wheelRightPivot,
+  };
 }
 
 function createGo2Model(assets) {
@@ -557,13 +700,22 @@ function calibrateGroundOffset(go2Rig) {
   return -minY + 0.002;
 }
 
+function calibrateGenericGroundOffset(root) {
+  root.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  if (!Number.isFinite(bounds.min.y)) {
+    return 0;
+  }
+  return -bounds.min.y + 0.002;
+}
+
 function placeGo2(root, cfg) {
   const world = mapToWorld(cfg.go2_pose.x_m, cfg.go2_pose.y_m, cfg.map.width_m, cfg.map.height_m);
   root.position.set(world.x, 0, world.z);
   root.rotation.y = (-cfg.go2_pose.yaw_deg * Math.PI) / 180;
 }
 
-function createScene(cfg, assets) {
+function createScene(cfg) {
   const scene = new THREE.Scene();
   scene.fog = new THREE.Fog(0x05070b, 7, 20);
 
@@ -571,21 +723,21 @@ function createScene(cfg, assets) {
   const obstacleBounds = createObstacles(scene, cfg);
   createLights(scene, cfg);
 
-  const go2Rig = createGo2Model(assets);
-  placeGo2(go2Rig.root, cfg);
-  scene.add(go2Rig.root);
-
   const scanRing = createScanRing();
-  scanRing.position.copy(go2Rig.root.position);
   scene.add(scanRing);
 
-  return { scene, go2Rig, scanRing, obstacleBounds };
+  return { scene, scanRing, obstacleBounds };
 }
 
-function updateHud(cfg) {
+function updateHud(cfg, platform = "Unitree Go2") {
+  const platformNode = document.querySelector('[data-role="platform"]');
   const renderNode = document.querySelector('[data-role="render"]');
   const mapNode = document.querySelector('[data-role="map"]');
   const poseNode = document.querySelector('[data-role="pose"]');
+
+  if (platformNode) {
+    platformNode.textContent = platform;
+  }
 
   if (renderNode) {
     renderNode.textContent = "Official DAE + URDF Rig";
@@ -1062,11 +1214,12 @@ async function main() {
   const cfg = await loadConfig();
   updateLoadingState("Loading official Go2 assets...");
 
-  let assets = null;
+  let go2Assets = null;
+  let turtlebot3Assets = null;
   try {
-    assets = await loadGo2Assets();
+    [go2Assets, turtlebot3Assets] = await Promise.all([loadGo2Assets(), loadTurtlebot3Assets()]);
   } catch {
-    updateLoadingState("Mesh load failed, using fallback rig");
+    updateLoadingState("Some meshes failed to load, using fallback parts where needed");
   }
 
   const renderer = createRenderer();
@@ -1077,7 +1230,13 @@ async function main() {
     100
   );
 
-  const { scene, go2Rig, scanRing, obstacleBounds } = createScene(cfg, assets);
+  const { scene, scanRing, obstacleBounds } = createScene(cfg);
+  const go2Rig = createGo2Model(go2Assets);
+  const turtlebot3Rig = createTurtlebot3Model(turtlebot3Assets);
+  placeGo2(go2Rig.root, cfg);
+  placeGo2(turtlebot3Rig.root, cfg);
+  scene.add(go2Rig.root);
+  scene.add(turtlebot3Rig.root);
   updateHud(cfg);
 
   const inputState = {
@@ -1101,7 +1260,6 @@ async function main() {
     isGrounded: true,
     yaw: go2Rig.root.rotation.y,
   };
-
   const walkSpeed = 2.15;
   const sprintSpeed = 3.45;
   const sneakSpeed = 1.35;
@@ -1112,6 +1270,30 @@ async function main() {
   const stepHeight = 0.18;
   const jumpStepBonus = 0.18;
   const autoNavSpeed = 1.2;
+  const robots = {
+    go2: {
+      type: "go2",
+      label: "Unitree Go2",
+      root: go2Rig.root,
+      rig: go2Rig,
+      collisionRadius: robotCollisionRadius,
+      stepHeight,
+      canJump: true,
+      groundOffset: 0,
+    },
+    turtlebot3: {
+      type: "turtlebot3",
+      label: "TurtleBot3 Burger",
+      root: turtlebot3Rig.root,
+      rig: turtlebot3Rig,
+      collisionRadius: turtlebot3Spec.footprintRadius,
+      stepHeight: turtlebot3Spec.stepHeight,
+      canJump: false,
+      groundOffset: 0,
+    },
+  };
+  let activeRobot = robots.go2;
+
   const halfWidth = cfg.map.width_m / 2 - 0.4;
   const halfHeight = cfg.map.height_m / 2 - 0.4;
   const moveDirection = new THREE.Vector3();
@@ -1154,6 +1336,30 @@ async function main() {
   scene.add(startMarker);
   scene.add(goalMarker);
   scene.add(routeGroup);
+
+  function syncActiveRobotTransform() {
+    for (const robot of Object.values(robots)) {
+      robot.root.visible = robot === activeRobot;
+      robot.root.position.set(motionState.x, motionState.groundOffset + motionState.supportY + motionState.jumpY, motionState.z);
+      robot.root.rotation.y = motionState.yaw;
+    }
+  }
+
+  function switchRobot(robotKey) {
+    const nextRobot = robots[robotKey];
+    if (!nextRobot) {
+      return;
+    }
+
+    activeRobot = nextRobot;
+    motionState.jumpY = 0;
+    motionState.velocityY = 0;
+    motionState.isGrounded = true;
+    motionState.groundOffset = activeRobot.groundOffset;
+    syncActiveRobotTransform();
+    updateHud(cfg, activeRobot.label);
+    updatePlannerStatus(`${activeRobot.label} selected.`);
+  }
 
   function setPlannerMode(mode) {
     plannerState.mode = mode;
@@ -1307,7 +1513,7 @@ async function main() {
     if (key === "ControlLeft" || key === "ControlRight") inputState.sprint = isPressed;
     if (key === "ShiftLeft" || key === "ShiftRight") inputState.sneak = isPressed;
 
-    if (key === "Space" && isPressed && motionState.isGrounded) {
+    if (key === "Space" && isPressed && motionState.isGrounded && activeRobot.canJump) {
       motionState.velocityY = jumpSpeed;
       motionState.isGrounded = false;
     }
@@ -1413,6 +1619,9 @@ async function main() {
       beginAutoNav();
     }
   });
+  document.getElementById("robot-select").addEventListener("change", (event) => {
+    switchRobot(event.target.value);
+  });
 
   function resize() {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -1433,7 +1642,10 @@ async function main() {
     turnAmount: 0,
     sneak: false,
   });
-  motionState.groundOffset = calibrateGroundOffset(go2Rig);
+  robots.go2.groundOffset = calibrateGroundOffset(go2Rig);
+  robots.turtlebot3.groundOffset = calibrateGenericGroundOffset(turtlebot3Rig.root);
+  motionState.groundOffset = activeRobot.groundOffset;
+  turtlebot3Rig.root.visible = false;
 
   function animate() {
     const delta = Math.min(clock.getDelta(), 0.05);
@@ -1512,6 +1724,10 @@ async function main() {
       }
     }
 
+    if (activeRobot.type === "turtlebot3") {
+      lateralInput = 0;
+    }
+
     motionState.yaw += turnInput * turnSpeed * delta;
 
     moveDirection.set(
@@ -1528,7 +1744,7 @@ async function main() {
       const targetX = clamp(motionState.x + moveDirection.x * currentMoveSpeed * delta, -halfWidth, halfWidth);
       const targetZ = clamp(motionState.z + moveDirection.z * currentMoveSpeed * delta, -halfHeight, halfHeight);
       const effectiveStepHeight =
-        stepHeight +
+        activeRobot.stepHeight +
         (motionState.isGrounded ? 0 : jumpStepBonus) +
         clamp(motionState.jumpY * 0.45, 0, 0.16);
 
@@ -1538,7 +1754,7 @@ async function main() {
         motionState.x,
         motionState.z,
         motionState.supportY,
-        robotCollisionRadius,
+        activeRobot.collisionRadius,
         effectiveStepHeight,
         obstacleBounds
       );
@@ -1551,9 +1767,9 @@ async function main() {
       motionState.supportY = evaluateSupportSurface(
         motionState.x,
         motionState.z,
-        robotCollisionRadius,
+        activeRobot.collisionRadius,
         motionState.supportY,
-        stepHeight,
+        activeRobot.stepHeight,
         obstacleBounds
       ).supportY;
     }
@@ -1566,8 +1782,8 @@ async function main() {
         motionState.supportY = evaluateSupportSurface(
           motionState.x,
           motionState.z,
-          robotCollisionRadius,
-          Math.max(motionState.supportY, stepHeight),
+          activeRobot.collisionRadius,
+          Math.max(motionState.supportY, activeRobot.stepHeight),
           Number.POSITIVE_INFINITY,
           obstacleBounds
         ).supportY;
@@ -1579,40 +1795,49 @@ async function main() {
 
     const crouchOffset = inputState.sneak ? -0.08 : 0;
     const idleBob = motionState.isGrounded ? Math.sin(elapsed * 1.2) * (inputState.sneak ? 0.007 : 0.015) : 0;
-    go2Rig.root.position.set(
+    activeRobot.root.position.set(
       motionState.x,
       motionState.groundOffset + motionState.supportY + motionState.jumpY + idleBob + crouchOffset,
       motionState.z
     );
-    go2Rig.root.rotation.y = motionState.yaw;
+    activeRobot.root.rotation.y = motionState.yaw;
 
-    updateGo2Pose(go2Rig, motionState, elapsed, {
-      speed: normalizedSpeed,
-      cadence: THREE.MathUtils.lerp(3.2, 8.8, Math.max(normalizedSpeed, Math.abs(turnInput) * 0.8)),
-      forward: forwardInput,
-      lateral: lateralInput,
-      turn: turnInput,
-      forwardAmount: Math.abs(forwardInput) * normalizedSpeed,
-      lateralAmount: Math.abs(lateralInput) * Math.max(normalizedSpeed, 0.45),
-      turnAmount: Math.abs(turnInput) * Math.max(0.5, 1 - normalizedSpeed * 0.25),
-      sneak: inputState.sneak,
-    });
+    if (activeRobot.type === "go2") {
+      updateGo2Pose(go2Rig, motionState, elapsed, {
+        speed: normalizedSpeed,
+        cadence: THREE.MathUtils.lerp(3.2, 8.8, Math.max(normalizedSpeed, Math.abs(turnInput) * 0.8)),
+        forward: forwardInput,
+        lateral: lateralInput,
+        turn: turnInput,
+        forwardAmount: Math.abs(forwardInput) * normalizedSpeed,
+        lateralAmount: Math.abs(lateralInput) * Math.max(normalizedSpeed, 0.45),
+        turnAmount: Math.abs(turnInput) * Math.max(0.5, 1 - normalizedSpeed * 0.25),
+        sneak: inputState.sneak,
+      });
+    } else {
+      const linearVelocity = currentMoveSpeed * forwardInput;
+      const yawRate = turnInput * turnSpeed;
+      const leftWheelLinear = linearVelocity - yawRate * (turtlebot3Spec.wheelSeparation * 0.5);
+      const rightWheelLinear = linearVelocity + yawRate * (turtlebot3Spec.wheelSeparation * 0.5);
+      turtlebot3Rig.wheelLeftPivot.rotation.z -= (leftWheelLinear / turtlebot3Spec.wheelRadius) * delta;
+      turtlebot3Rig.wheelRightPivot.rotation.z -= (rightWheelLinear / turtlebot3Spec.wheelRadius) * delta;
+    }
 
     scanRing.scale.setScalar(pulse);
-    scanRing.position.set(go2Rig.root.position.x, 0, go2Rig.root.position.z);
+    scanRing.position.set(activeRobot.root.position.x, 0, activeRobot.root.position.z);
 
     const cameraYaw = motionState.yaw + orbitState.azimuth;
     const horizontalRadius = Math.cos(orbitState.polar) * orbitState.distance;
     const verticalOffset = Math.sin(orbitState.polar) * orbitState.distance;
     chaseOffset.set(-horizontalRadius, verticalOffset, 0);
     chaseOffset.applyAxisAngle(upAxis, cameraYaw);
-    chasePosition.copy(go2Rig.root.position).add(chaseOffset);
+    chasePosition.copy(activeRobot.root.position).add(chaseOffset);
     camera.position.lerp(chasePosition, 0.12);
 
     chaseLookAt.set(
-      go2Rig.root.position.x + Math.cos(motionState.yaw) * 0.55,
+      activeRobot.root.position.x + Math.cos(motionState.yaw) * 0.55,
       0.42 + motionState.jumpY * 0.25 + crouchOffset * 0.3,
-      go2Rig.root.position.z - Math.sin(motionState.yaw) * 0.55
+      activeRobot.root.position.z - Math.sin(motionState.yaw) * 0.55
     );
     camera.lookAt(chaseLookAt);
 
