@@ -123,6 +123,10 @@ function moveTowards(current, target, maxDelta) {
   return current + Math.sign(target - current) * maxDelta;
 }
 
+function shortestAngleDelta(target, current) {
+  return THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI;
+}
+
 function mapToWorld(x, y, widthM, heightM) {
   return {
     x: x - widthM / 2,
@@ -212,7 +216,7 @@ function createObstacles(scene, cfg) {
   const bounds = [];
 
   const material = new THREE.MeshStandardMaterial({
-    color: 0x607089,
+    color: 0x9fd7ff,
     roughness: 0.72,
     metalness: 0.18,
   });
@@ -648,21 +652,39 @@ function updateGo2Pose(go2Rig, motionState, elapsed, moveState) {
     const sideSign = leg.isLeft ? 1 : -1;
     const frontSign = leg.isFront ? 1 : -1;
 
+    // Keep the forward trot as the base rhythm, then layer sidestep spread
+    // and turning twist on top so the gait stays physically coherent.
     const forwardSwing = swing * moveState.forward * 0.95;
-    const lateralSwing = swing * moveState.lateral * sideSign * 0.75;
-    const turnSwing = swing * moveState.turn * frontSign * sideSign * 0.85;
+
+    // Sidestepping should open the stance laterally while keeping diagonal timing.
+    const lateralSwing = swing * moveState.lateral * frontSign * 0.2;
+    const lateralHipStride = lift * moveState.lateral * 0.26;
+    const lateralLift = lift * moveState.lateralAmount * 0.62;
+
+    // Turning in place reuses the trot cadence, but twists left/right legs oppositely.
+    const turnSwing = swing * moveState.turn * sideSign * 0.42;
+    const turnHipStride = swing * moveState.turn * sideSign * 0.34;
+    const turnLift = lift * moveState.turnAmount * 0.72;
+
     const compositeSwing = forwardSwing + lateralSwing + turnSwing;
+    const compositeLift =
+      lift * moveState.forwardAmount * 0.9 +
+      lateralLift +
+      turnLift;
 
-    const liftGain =
-      moveState.forwardAmount * 0.85 +
-      moveState.lateralAmount * 0.75 +
-      moveState.turnAmount * 0.8;
-    const compositeLift = lift * liftGain;
+    const turnHipBias = moveState.turn * sideSign * 0.08;
+    const lateralHipBias = moveState.lateral * 0.16;
 
-    const turnHipBias = moveState.turn * frontSign * sideSign * 0.16;
-    const lateralHipBias = moveState.lateral * sideSign * 0.12;
-
-    const hip = clamp(baseHip * sideSign + lateralLean * sideSign - moveState.turn * 0.05 * sideSign, go2Spec.joints.hip.min, go2Spec.joints.hip.max);
+    const hip = clamp(
+      baseHip * sideSign +
+      lateralLean * sideSign +
+      lateralHipStride +
+      turnHipStride +
+      lateralHipBias +
+      turnHipBias,
+      go2Spec.joints.hip.min,
+      go2Spec.joints.hip.max
+    );
     const thigh = clamp(
       baseThigh + compositeSwing * stepAmplitude + jumpTuck,
       leg.thighLimits.min,
@@ -673,13 +695,8 @@ function updateGo2Pose(go2Rig, motionState, elapsed, moveState) {
       go2Spec.joints.calf.min,
       go2Spec.joints.calf.max
     );
-    const finalHip = clamp(
-      hip + lateralHipBias + turnHipBias,
-      go2Spec.joints.hip.min,
-      go2Spec.joints.hip.max
-    );
 
-    applyJointPose(leg, { hip: finalHip, thigh, calf });
+    applyJointPose(leg, { hip, thigh, calf });
   }
 }
 
@@ -1325,10 +1342,13 @@ async function main() {
     start: null,
     goal: null,
     path: null,
+    polylineMetrics: null,
     smoothPath: null,
-    pathMetrics: null,
+    smoothPathMetrics: null,
     autoActive: false,
     pathProgress: 0,
+    autoSegmentIndex: 1,
+    autoSegmentPhase: "align",
   };
   const startMarker = createMarker(0x4de18b, 0.1, 0.12);
   const goalMarker = createMarker(0xff7a7a, 0.1, 0.12);
@@ -1391,6 +1411,25 @@ async function main() {
     return { x: position.x, z: position.z };
   }
 
+  function clearPlannedPath() {
+    plannerState.path = null;
+    plannerState.polylineMetrics = null;
+    plannerState.smoothPath = null;
+    plannerState.smoothPathMetrics = null;
+    plannerState.autoSegmentPhase = "align";
+    clearRouteRender();
+    stopAutoNav();
+  }
+
+  function setStartToRobotPosition() {
+    const startPoint = worldToMapPoint(activeRobot.root.position);
+    plannerState.start = startPoint;
+    setMarkerPosition(startMarker, startPoint, motionState.supportY);
+    clearPlannedPath();
+    setPlannerMode(null);
+    updatePlannerStatus("Start point set to robot position.");
+  }
+
   function planCurrentPath() {
     if (!plannerState.start || !plannerState.goal) {
       updatePlannerStatus("Set both start and goal first.");
@@ -1416,18 +1455,23 @@ async function main() {
     const rawPath = dijkstraShortestPath(nodes, graph, 0, 1);
     if (!rawPath) {
       plannerState.path = null;
+      plannerState.polylineMetrics = null;
       plannerState.smoothPath = null;
-      plannerState.pathMetrics = null;
+      plannerState.smoothPathMetrics = null;
       plannerState.autoActive = false;
+      plannerState.autoSegmentPhase = "align";
       clearRouteRender();
       updatePlannerStatus("No collision-free path found.");
       return;
     }
 
     plannerState.path = prunePath(rawPath, inflatedBounds);
+    plannerState.polylineMetrics = computePathMetrics(plannerState.path);
     plannerState.smoothPath = buildSmoothPath(plannerState.path);
-    plannerState.pathMetrics = computePathMetrics(plannerState.smoothPath);
+    plannerState.smoothPathMetrics = computePathMetrics(plannerState.smoothPath);
     plannerState.autoActive = false;
+    plannerState.autoSegmentIndex = 1;
+    plannerState.autoSegmentPhase = "align";
     clearRouteRender();
     routeGroup.add(buildPathRenderables(plannerState.path));
 
@@ -1441,22 +1485,40 @@ async function main() {
   }
 
   function beginAutoNav() {
-    if (!plannerState.smoothPath || plannerState.smoothPath.length < 2) {
+    if (!plannerState.path || plannerState.path.length < 2) {
       updatePlannerStatus("Plan a path before starting auto nav.");
       return;
     }
 
-    const projection = projectPointOntoPath(
-      { x: motionState.x, z: motionState.z },
-      plannerState.smoothPath,
-      plannerState.pathMetrics
-    );
     plannerState.autoActive = true;
-    plannerState.pathProgress = projection.progress;
     autoCommandState.forward = 0;
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
     autoCommandState.speed = 0;
+    const currentPoint = { x: motionState.x, z: motionState.z };
+    if (activeRobot.type === "go2") {
+      plannerState.pathProgress = 0;
+      plannerState.autoSegmentIndex = Math.min(1, plannerState.path.length - 1);
+      const startDistance = Math.hypot(
+        plannerState.path[0].x - motionState.x,
+        plannerState.path[0].z - motionState.z
+      );
+      plannerState.autoSegmentPhase = startDistance > 0.08 ? "startAlign" : "align";
+    } else {
+      if (!plannerState.smoothPath || !plannerState.smoothPathMetrics) {
+        updatePlannerStatus("Plan a smooth path before starting auto nav.");
+        plannerState.autoActive = false;
+        return;
+      }
+      const projection = projectPointOntoPath(
+        currentPoint,
+        plannerState.smoothPath,
+        plannerState.smoothPathMetrics
+      );
+      plannerState.pathProgress = projection.progress;
+      plannerState.autoSegmentIndex = 1;
+      plannerState.autoSegmentPhase = "align";
+    }
     updatePlannerStatus("Auto navigation running.");
     document.getElementById("auto-nav-btn").textContent = "Stop Auto";
     document.getElementById("auto-nav-btn").classList.add("is-active");
@@ -1465,6 +1527,8 @@ async function main() {
   function stopAutoNav(statusText) {
     plannerState.autoActive = false;
     plannerState.pathProgress = 0;
+    plannerState.autoSegmentIndex = 1;
+    plannerState.autoSegmentPhase = "align";
     autoCommandState.forward = 0;
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
@@ -1480,7 +1544,7 @@ async function main() {
     cfg.go2_pose.x_m = Number((motionState.x + cfg.map.width_m / 2).toFixed(2));
     cfg.go2_pose.y_m = Number((motionState.z + cfg.map.height_m / 2).toFixed(2));
     cfg.go2_pose.yaw_deg = Math.round((-motionState.yaw * 180) / Math.PI);
-    updateHud(cfg);
+    updateHud(cfg, activeRobot.label);
   }
 
   function onKeyChange(event, isPressed) {
@@ -1550,11 +1614,7 @@ async function main() {
           setMarkerPosition(goalMarker, clampedPoint, supportY);
           updatePlannerStatus("Goal point set.");
         }
-        plannerState.path = null;
-        plannerState.smoothPath = null;
-        plannerState.pathMetrics = null;
-        clearRouteRender();
-        stopAutoNav();
+        clearPlannedPath();
         setPlannerMode(null);
       }
       return;
@@ -1600,9 +1660,7 @@ async function main() {
   renderer.domElement.addEventListener("pointercancel", onPointerUp);
   renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
   document.getElementById("set-start-btn").addEventListener("click", () => {
-    const nextMode = plannerState.mode === "start" ? null : "start";
-    setPlannerMode(nextMode);
-    updatePlannerStatus(nextMode ? "Click the map to place the start point." : "Select start and goal points.");
+    setStartToRobotPosition();
   });
   document.getElementById("set-goal-btn").addEventListener("click", () => {
     const nextMode = plannerState.mode === "goal" ? null : "goal";
@@ -1656,71 +1714,244 @@ async function main() {
     let forwardInput = (inputState.forward ? 1 : 0) - (inputState.backward ? 1 : 0);
     let lateralInput = (inputState.right ? 1 : 0) - (inputState.left ? 1 : 0);
     let currentMoveSpeed = walkSpeed;
+    let autoMoveDirection = null;
+    let directAutoMotion = false;
+    let directAutoSpeed = 0;
+    let poseForwardInput = forwardInput;
+    let poseLateralInput = lateralInput;
+    let poseTurnInput = turnInput;
     if (inputState.sneak) {
       currentMoveSpeed = sneakSpeed;
     } else if (inputState.sprint && inputState.forward) {
       currentMoveSpeed = sprintSpeed;
     }
 
-    if (plannerState.autoActive && plannerState.smoothPath && plannerState.pathMetrics) {
+    if (plannerState.autoActive) {
       const currentPoint = { x: motionState.x, z: motionState.z };
-      const projection = projectPointOntoPath(currentPoint, plannerState.smoothPath, plannerState.pathMetrics);
-      plannerState.pathProgress = Math.max(plannerState.pathProgress, projection.progress);
 
-      const remaining = plannerState.pathMetrics.totalLength - plannerState.pathProgress;
-      const goalPoint = plannerState.smoothPath[plannerState.smoothPath.length - 1];
-      const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
+      if (activeRobot.type === "go2" && plannerState.path && plannerState.polylineMetrics) {
+        const goalPoint = plannerState.path[plannerState.path.length - 1];
+        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
 
-      if (remaining < 0.08 && goalDistance < 0.12) {
-        plannerState.start = worldToMapPoint(go2Rig.root.position);
-        setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
-        stopAutoNav("Goal reached.");
-      } else {
-        const lookAhead = clamp(0.34 + projection.distance * 1.15, 0.28, 0.7);
-        const targetProgress = clamp(
-          plannerState.pathProgress + lookAhead,
-          0,
-          plannerState.pathMetrics.totalLength
-        );
-        const targetPoint = samplePathAtProgress(
-          plannerState.smoothPath,
-          plannerState.pathMetrics,
-          targetProgress
-        );
-        const toTargetX = targetPoint.x - motionState.x;
-        const toTargetZ = targetPoint.z - motionState.z;
-        const targetYaw = Math.atan2(-toTargetZ, toTargetX);
-        const yawDelta =
-          THREE.MathUtils.euclideanModulo(targetYaw - motionState.yaw + Math.PI, Math.PI * 2) - Math.PI;
+        if (plannerState.autoSegmentIndex >= plannerState.path.length && goalDistance < 0.12) {
+          plannerState.start = worldToMapPoint(activeRobot.root.position);
+          setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
+          stopAutoNav("Goal reached.");
+        } else {
+          const targetIndex = Math.min(plannerState.autoSegmentIndex, plannerState.path.length - 1);
+          const previousPoint = plannerState.path[Math.max(0, targetIndex - 1)];
+          const targetPoint = plannerState.path[targetIndex];
+          const toTargetX = targetPoint.x - motionState.x;
+          const toTargetZ = targetPoint.z - motionState.z;
+          const waypointDistance = Math.hypot(toTargetX, toTargetZ);
+          const isFinalWaypoint = targetIndex === plannerState.path.length - 1;
+          const segmentYaw = Math.atan2(
+            -(targetPoint.z - previousPoint.z),
+            targetPoint.x - previousPoint.x
+          );
+          const nextSegmentYaw = !isFinalWaypoint
+            ? Math.atan2(
+                -(plannerState.path[targetIndex + 1].z - targetPoint.z),
+                plannerState.path[targetIndex + 1].x - targetPoint.x
+              )
+            : segmentYaw;
+          const alignThreshold = 0.035;
+          const turnThreshold = 0.04;
+          const reachedWaypoint = waypointDistance < 0.04;
 
-        const desiredTurn = clamp(yawDelta * 1.5, -0.62, 0.62);
-        const headingAbs = Math.abs(yawDelta);
-        let desiredForward = 0.44;
-        if (headingAbs > 0.75) {
-          desiredForward = 0;
-        } else if (headingAbs > 0.4) {
-          desiredForward = 0.12;
+          directAutoMotion = true;
+          turnInput = 0;
+          forwardInput = 0;
+          lateralInput = 0;
+
+          if (plannerState.autoSegmentPhase === "startAlign") {
+            const startPoint = plannerState.path[0];
+            const startYaw = Math.atan2(-(startPoint.z - motionState.z), startPoint.x - motionState.x);
+            const yawDelta = shortestAngleDelta(startYaw, motionState.yaw);
+            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
+            motionState.yaw += yawStep;
+            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
+            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
+            directAutoSpeed = 0.42;
+
+            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
+              motionState.yaw = startYaw;
+              plannerState.autoSegmentPhase = "startMove";
+            }
+          } else if (plannerState.autoSegmentPhase === "startMove") {
+            const startPoint = plannerState.path[0];
+            const toStartX = startPoint.x - motionState.x;
+            const toStartZ = startPoint.z - motionState.z;
+            const startDistance = Math.hypot(toStartX, toStartZ);
+            const moveSpeed = autoNavSpeed * clamp(startDistance / 0.45, 0.22, 0.72);
+            const moveDistance = Math.min(moveSpeed * delta, startDistance);
+            const dirX = toStartX / Math.max(startDistance, 1e-6);
+            const dirZ = toStartZ / Math.max(startDistance, 1e-6);
+            const targetX = clamp(motionState.x + dirX * moveDistance, -halfWidth, halfWidth);
+            const targetZ = clamp(motionState.z + dirZ * moveDistance, -halfHeight, halfHeight);
+            const resolved = resolveMotionWithSteps(
+              targetX,
+              targetZ,
+              motionState.x,
+              motionState.z,
+              motionState.supportY,
+              activeRobot.collisionRadius,
+              activeRobot.stepHeight,
+              obstacleBounds
+            );
+            motionState.x = resolved.x;
+            motionState.z = resolved.z;
+            if (motionState.isGrounded) {
+              motionState.supportY = resolved.supportY;
+            }
+            forwardInput = 0.36;
+            poseForwardInput = 0.78;
+            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.52, 0.72);
+
+            if (startDistance < 0.04 || moveDistance >= startDistance - 1e-6) {
+              motionState.x = startPoint.x;
+              motionState.z = startPoint.z;
+              plannerState.autoSegmentIndex = Math.min(1, plannerState.path.length - 1);
+              plannerState.autoSegmentPhase = "align";
+              forwardInput = 0;
+            }
+          } else if (plannerState.autoSegmentPhase === "align") {
+            const yawDelta = shortestAngleDelta(segmentYaw, motionState.yaw);
+            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
+            motionState.yaw += yawStep;
+            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
+            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
+            directAutoSpeed = 0.42;
+
+            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
+              motionState.yaw = segmentYaw;
+              plannerState.autoSegmentPhase = "move";
+            }
+          } else if (plannerState.autoSegmentPhase === "move") {
+            const segmentDx = targetPoint.x - previousPoint.x;
+            const segmentDz = targetPoint.z - previousPoint.z;
+            const segmentLength = Math.hypot(segmentDx, segmentDz);
+            autoMoveDirection = {
+              x: segmentDx / Math.max(segmentLength, 1e-6),
+              z: segmentDz / Math.max(segmentLength, 1e-6),
+            };
+            const moveSpeed = autoNavSpeed * clamp(waypointDistance / 0.45, 0.22, 0.72);
+            const moveDistance = Math.min(moveSpeed * delta, waypointDistance);
+            const targetX = clamp(motionState.x + autoMoveDirection.x * moveDistance, -halfWidth, halfWidth);
+            const targetZ = clamp(motionState.z + autoMoveDirection.z * moveDistance, -halfHeight, halfHeight);
+            const resolved = resolveMotionWithSteps(
+              targetX,
+              targetZ,
+              motionState.x,
+              motionState.z,
+              motionState.supportY,
+              activeRobot.collisionRadius,
+              activeRobot.stepHeight,
+              obstacleBounds
+            );
+            motionState.x = resolved.x;
+            motionState.z = resolved.z;
+            if (motionState.isGrounded) {
+              motionState.supportY = resolved.supportY;
+            }
+            forwardInput = 0.36;
+            poseForwardInput = 0.82;
+            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.56, 0.76);
+
+            if (reachedWaypoint || moveDistance >= waypointDistance - 1e-6) {
+              motionState.x = targetPoint.x;
+              motionState.z = targetPoint.z;
+              if (isFinalWaypoint) {
+                plannerState.autoSegmentIndex = plannerState.path.length;
+                forwardInput = 0;
+                autoMoveDirection = null;
+              } else {
+                plannerState.autoSegmentPhase = "turn";
+                forwardInput = 0;
+                autoMoveDirection = null;
+              }
+            }
+          } else if (plannerState.autoSegmentPhase === "turn") {
+            const yawDelta = shortestAngleDelta(nextSegmentYaw, motionState.yaw);
+            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
+            motionState.yaw += yawStep;
+            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
+            poseTurnInput = Math.sign(yawDelta || 1) * 0.88;
+            directAutoSpeed = 0.48;
+
+            if (Math.abs(yawDelta) < turnThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
+              motionState.yaw = nextSegmentYaw;
+              plannerState.autoSegmentIndex += 1;
+              plannerState.autoSegmentPhase = "move";
+            }
+          }
         }
+      } else if (
+        activeRobot.type === "turtlebot3" &&
+        plannerState.smoothPath &&
+        plannerState.smoothPathMetrics
+      ) {
+        const projection = projectPointOntoPath(
+          currentPoint,
+          plannerState.smoothPath,
+          plannerState.smoothPathMetrics
+        );
+        plannerState.pathProgress = Math.max(plannerState.pathProgress, projection.progress);
 
-        const speedScale =
-          goalDistance < 0.45
-            ? clamp(goalDistance / 0.45, 0.16, 1)
-            : clamp(1 - projection.distance * 0.95, 0.35, 1);
-        const desiredSpeed = autoNavSpeed * speedScale;
+        const remaining = plannerState.smoothPathMetrics.totalLength - plannerState.pathProgress;
+        const goalPoint = plannerState.smoothPath[plannerState.smoothPath.length - 1];
+        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
 
-        const maxForwardDelta = 0.8 * delta;
-        const maxTurnDelta = 1.15 * delta;
-        const maxSpeedDelta = 0.52 * delta;
+        if (remaining < 0.08 && goalDistance < 0.12) {
+          plannerState.start = worldToMapPoint(activeRobot.root.position);
+          setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
+          stopAutoNav("Goal reached.");
+        } else {
+          const lookAhead = clamp(0.34 + projection.distance * 1.15, 0.28, 0.7);
+          const targetProgress = clamp(
+            plannerState.pathProgress + lookAhead,
+            0,
+            plannerState.smoothPathMetrics.totalLength
+          );
+          const targetPoint = samplePathAtProgress(
+            plannerState.smoothPath,
+            plannerState.smoothPathMetrics,
+            targetProgress
+          );
+          const toTargetX = targetPoint.x - motionState.x;
+          const toTargetZ = targetPoint.z - motionState.z;
+          const targetYaw = Math.atan2(-toTargetZ, toTargetX);
+          const yawDelta = shortestAngleDelta(targetYaw, motionState.yaw);
 
-        autoCommandState.forward = moveTowards(autoCommandState.forward, desiredForward, maxForwardDelta);
-        autoCommandState.lateral = moveTowards(autoCommandState.lateral, 0, maxForwardDelta);
-        autoCommandState.turn = moveTowards(autoCommandState.turn, desiredTurn, maxTurnDelta);
-        autoCommandState.speed = moveTowards(autoCommandState.speed, desiredSpeed, maxSpeedDelta);
+          const desiredTurn = clamp(yawDelta * 1.5, -0.62, 0.62);
+          const headingAbs = Math.abs(yawDelta);
+          let desiredForward = 0.44;
+          if (headingAbs > 0.75) {
+            desiredForward = 0;
+          } else if (headingAbs > 0.4) {
+            desiredForward = 0.12;
+          }
 
-        turnInput = autoCommandState.turn;
-        forwardInput = autoCommandState.forward;
-        lateralInput = autoCommandState.lateral;
-        currentMoveSpeed = autoCommandState.speed;
+          const speedScale =
+            goalDistance < 0.45
+              ? clamp(goalDistance / 0.45, 0.16, 1)
+              : clamp(1 - projection.distance * 0.95, 0.35, 1);
+          const desiredSpeed = autoNavSpeed * speedScale;
+
+          const maxForwardDelta = 0.8 * delta;
+          const maxTurnDelta = 1.15 * delta;
+          const maxSpeedDelta = 0.52 * delta;
+
+          autoCommandState.forward = moveTowards(autoCommandState.forward, desiredForward, maxForwardDelta);
+          autoCommandState.lateral = moveTowards(autoCommandState.lateral, 0, maxForwardDelta);
+          autoCommandState.turn = moveTowards(autoCommandState.turn, desiredTurn, maxTurnDelta);
+          autoCommandState.speed = moveTowards(autoCommandState.speed, desiredSpeed, maxSpeedDelta);
+
+          turnInput = autoCommandState.turn;
+          forwardInput = autoCommandState.forward;
+          lateralInput = 0;
+          currentMoveSpeed = autoCommandState.speed;
+        }
       }
     }
 
@@ -1728,17 +1959,27 @@ async function main() {
       lateralInput = 0;
     }
 
-    motionState.yaw += turnInput * turnSpeed * delta;
+    if (!directAutoMotion) {
+      motionState.yaw += turnInput * turnSpeed * delta;
 
-    moveDirection.set(
-      Math.cos(motionState.yaw) * forwardInput + Math.sin(motionState.yaw) * lateralInput,
-      0,
-      -Math.sin(motionState.yaw) * forwardInput + Math.cos(motionState.yaw) * lateralInput
-    );
+      if (autoMoveDirection) {
+        moveDirection.set(autoMoveDirection.x, 0, autoMoveDirection.z);
+      } else {
+        moveDirection.set(
+          Math.cos(motionState.yaw) * forwardInput + Math.sin(motionState.yaw) * lateralInput,
+          0,
+          -Math.sin(motionState.yaw) * forwardInput + Math.cos(motionState.yaw) * lateralInput
+        );
+      }
+    } else {
+      moveDirection.set(0, 0, 0);
+    }
 
     let normalizedSpeed = 0;
 
-    if (moveDirection.lengthSq() > 0) {
+    if (directAutoMotion) {
+      normalizedSpeed = directAutoSpeed;
+    } else if (moveDirection.lengthSq() > 0) {
       moveDirection.normalize();
       normalizedSpeed = currentMoveSpeed / sprintSpeed;
       const targetX = clamp(motionState.x + moveDirection.x * currentMoveSpeed * delta, -halfWidth, halfWidth);
@@ -1794,7 +2035,7 @@ async function main() {
     }
 
     const crouchOffset = inputState.sneak ? -0.08 : 0;
-    const idleBob = motionState.isGrounded ? Math.sin(elapsed * 1.2) * (inputState.sneak ? 0.007 : 0.015) : 0;
+    const idleBob = 0;
     activeRobot.root.position.set(
       motionState.x,
       motionState.groundOffset + motionState.supportY + motionState.jumpY + idleBob + crouchOffset,
@@ -1805,13 +2046,17 @@ async function main() {
     if (activeRobot.type === "go2") {
       updateGo2Pose(go2Rig, motionState, elapsed, {
         speed: normalizedSpeed,
-        cadence: THREE.MathUtils.lerp(3.2, 8.8, Math.max(normalizedSpeed, Math.abs(turnInput) * 0.8)),
-        forward: forwardInput,
-        lateral: lateralInput,
-        turn: turnInput,
-        forwardAmount: Math.abs(forwardInput) * normalizedSpeed,
-        lateralAmount: Math.abs(lateralInput) * Math.max(normalizedSpeed, 0.45),
-        turnAmount: Math.abs(turnInput) * Math.max(0.5, 1 - normalizedSpeed * 0.25),
+        cadence: THREE.MathUtils.lerp(
+          3.4,
+          9.4,
+          Math.max(normalizedSpeed, Math.abs(poseTurnInput) * 0.9)
+        ),
+        forward: poseForwardInput,
+        lateral: poseLateralInput,
+        turn: poseTurnInput,
+        forwardAmount: Math.abs(poseForwardInput) * Math.max(normalizedSpeed, 0.6),
+        lateralAmount: Math.abs(poseLateralInput) * Math.max(normalizedSpeed, 0.45),
+        turnAmount: Math.abs(poseTurnInput) * Math.max(normalizedSpeed, 0.62),
         sneak: inputState.sneak,
       });
     } else {
