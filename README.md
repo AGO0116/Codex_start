@@ -1,4 +1,4 @@
-# Codex_start
+# robot-nav-viewer
 
 Three.js ベースの 3D ロボットビューアです。  
 Unitree Go2 を中心に、TurtleBot3 Burger も切り替えて表示でき、手動操作と簡易な自律移動デモを試せます。
