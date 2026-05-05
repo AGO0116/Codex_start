@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Unitree Go2 Tactical Viewer</title>
+    <title>Robot Nav Viewer</title>
     <script type="importmap">
       {
         "imports": {
@@ -40,6 +40,7 @@
         left: 18px;
         z-index: 1;
         width: min(340px, calc(100vw - 36px));
+        max-height: calc(100vh - 36px);
         padding: 16px 18px;
         border: 1px solid var(--panel-border);
         border-radius: 18px;
@@ -48,6 +49,7 @@
         box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
         font-size: 13px;
         line-height: 1.6;
+        overflow: auto;
       }
 
       .eyebrow {
@@ -103,13 +105,6 @@
         font-weight: 600;
       }
 
-      .controls {
-        margin-top: 16px;
-        padding-top: 14px;
-        border-top: 1px solid rgba(255, 255, 255, 0.08);
-        color: #c9d2df;
-      }
-
       .planner {
         margin-top: 14px;
         padding-top: 14px;
@@ -121,6 +116,23 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
         margin-top: 10px;
+      }
+
+      .planner-group {
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+
+      .planner-group-title {
+        margin: 0 0 8px;
+        color: #ffb176;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
 
       button {
@@ -150,6 +162,70 @@
         color: #ffd9bd;
       }
 
+      .action-button {
+        display: grid;
+        gap: 2px;
+        min-height: 58px;
+        text-align: left;
+      }
+
+      .action-button.with-icon {
+        grid-template-columns: 1fr auto;
+        align-items: center;
+      }
+
+      .action-button strong {
+        font-size: 13px;
+        line-height: 1.15;
+      }
+
+      .action-button span {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.2;
+      }
+
+      .button-copy {
+        display: grid;
+        gap: 2px;
+      }
+
+      .button-icon {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px 999px 999px 0;
+        transform: rotate(-45deg);
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
+      }
+
+      .button-icon.start {
+        background: linear-gradient(180deg, #6cffb0 0%, #21c76d 100%);
+      }
+
+      .button-icon.goal {
+        background: linear-gradient(180deg, #ff9898 0%, #ff4f5d 100%);
+      }
+
+      .route-button {
+        border-color: rgba(77, 225, 139, 0.18);
+        background: rgba(77, 225, 139, 0.06);
+      }
+
+      .route-button:hover {
+        border-color: rgba(77, 225, 139, 0.4);
+        background: rgba(77, 225, 139, 0.1);
+      }
+
+      .accent-button {
+        border-color: rgba(255, 122, 26, 0.34);
+        background: rgba(255, 122, 26, 0.1);
+      }
+
+      .accent-button:hover {
+        border-color: rgba(255, 122, 26, 0.58);
+        background: rgba(255, 122, 26, 0.16);
+      }
+
       .planner-status {
         margin-top: 10px;
         color: #d8e0eb;
@@ -176,13 +252,253 @@
       strong {
         color: var(--text);
       }
+
+      #planner-debug {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        z-index: 1;
+        width: min(360px, calc(100vw - 36px));
+        padding: 16px 18px;
+        border: 1px solid var(--panel-border);
+        border-radius: 18px;
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        display: none;
+      }
+
+      #planner-debug.is-visible {
+        display: block;
+      }
+
+      .debug-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .debug-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .debug-subtle {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .debug-canvas {
+        width: 100%;
+        margin-top: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(5, 9, 16, 0.88);
+      }
+
+      .debug-stats {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .debug-stat {
+        padding: 8px 10px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .guide-panel {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 2;
+        width: min(290px, calc(100vw - 36px));
+        padding: 14px 16px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: rgba(10, 14, 22, 0.88);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+      }
+
+      .guide-panel.is-hidden {
+        display: none;
+      }
+
+      .guide-title {
+        margin: 0 0 10px;
+        color: #ffb176;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .guide-item {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        gap: 10px;
+        align-items: center;
+        margin-top: 8px;
+        color: #d8e0eb;
+        font-size: 13px;
+      }
+
+      .guide-keys {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .guide-key {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 30px;
+        padding: 6px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        color: #f4f7fb;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      #editor-screen {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        display: none;
+        pointer-events: none;
+      }
+
+      #editor-screen.is-visible {
+        display: block;
+      }
+
+      .editor-main,
+      .editor-side {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: rgba(10, 14, 22, 0.88);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
+      }
+
+      .editor-main {
+        position: fixed;
+        left: 18px;
+        bottom: 18px;
+        width: min(420px, calc(100vw - 36px));
+        max-height: min(46vh, calc(100vh - 36px));
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .editor-side {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        width: 340px;
+        max-height: calc(100vh - 36px);
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .editor-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .editor-title {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .editor-toolbar {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .editor-note {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .editor-tool-group {
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+
+      .editor-tool-title {
+        margin: 0 0 8px;
+        color: #ffb176;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .editor-tool-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .editor-canvas {
+        display: none;
+      }
+
+      .editor-form {
+        display: grid;
+        gap: 10px;
+      }
+
+      .editor-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        font: inherit;
+        box-sizing: border-box;
+      }
     </style>
   </head>
   <body>
     <div id="hud">
-      <div class="eyebrow">Unitree Mobility Stack</div>
-      <h1>Go2 Tactical Viewer</h1>
-      <p>A compact 3D field viewer with a darker, sharper Go2-inspired control-room feel.</p>
+      <div class="eyebrow">Multi Robot Viewer</div>
+      <h1>Robot Nav Viewer</h1>
+      <p>3D viewer and navigation sandbox for legged and wheeled robots.</p>
       <div class="specs">
         <div class="spec">
           <span class="spec-label">Platform</span>
@@ -201,25 +517,181 @@
           <span class="spec-value" data-role="pose">x 3.5 / y 2 / yaw 45deg</span>
         </div>
       </div>
-      <div class="controls">
-        <strong>Controls</strong><br />
-        Drag orbit / Wheel zoom / WASD move / Left-Right turn / Ctrl sprint / Shift sneak / Space jump
-      </div>
       <div class="planner">
         <strong>Auto Nav</strong>
         <select id="robot-select">
           <option value="go2">Unitree Go2</option>
           <option value="turtlebot3">TurtleBot3 Burger</option>
         </select>
-        <div class="planner-actions">
-          <button id="set-start-btn" type="button">Set Start</button>
-          <button id="set-goal-btn" type="button">Set Goal</button>
-          <button id="plan-path-btn" type="button">Plan Path</button>
-          <button id="auto-nav-btn" type="button">Start Auto</button>
+        <div class="planner-group">
+          <div class="planner-group-title">View</div>
+          <div class="planner-actions">
+            <button id="camera-mode-btn" type="button" class="action-button"><strong>Camera</strong><span>Follow or free view</span></button>
+            <button id="guide-toggle-btn" type="button" class="action-button"><strong>Guide</strong><span>Toggle help with E</span></button>
+          </div>
+        </div>
+        <div class="planner-group">
+          <div class="planner-group-title">Route Tools</div>
+          <div class="planner-actions">
+            <button id="set-start-btn" type="button" class="action-button"><strong>Start</strong><span>Place route start</span></button>
+            <button id="set-goal-btn" type="button" class="action-button"><strong>Goal</strong><span>Place route goal</span></button>
+            <button id="plan-path-btn" type="button" class="action-button"><strong>Plan</strong><span>Build shortest path</span></button>
+            <button id="auto-nav-btn" type="button" class="action-button"><strong>Auto</strong><span>Start or stop tracking</span></button>
+          </div>
+        </div>
+        <div class="planner-group">
+          <div class="planner-group-title">Map</div>
+          <div class="planner-actions">
+            <button id="map-edit-btn" type="button" class="action-button"><strong>Map Edit</strong><span>Open 3D editor</span></button>
+          </div>
         </div>
         <div class="planner-status" data-role="planner-status">Select start and goal points.</div>
       </div>
     </div>
-    <script type="module" src="./viewer.js?v=20260504-polyline-follow"></script>
+    <aside id="planner-debug" aria-hidden="true">
+      <div class="debug-head">
+        <h2 class="debug-title">Path Planning</h2>
+        <span class="debug-subtle" data-role="debug-robot">Unitree Go2</span>
+      </div>
+      <canvas
+        id="planner-debug-canvas"
+        class="debug-canvas"
+        width="324"
+        height="220"
+      ></canvas>
+      <div class="debug-stats">
+        <div class="debug-stat"><span class="spec-label">Nodes</span><span class="spec-value" data-role="debug-nodes">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Edges</span><span class="spec-value" data-role="debug-edges">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Raw Path</span><span class="spec-value" data-role="debug-raw">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Final Path</span><span class="spec-value" data-role="debug-final">0</span></div>
+      </div>
+    </aside>
+    <aside id="guide-panel" class="guide-panel" data-role="control-guide" aria-hidden="false">
+      <h2 class="guide-title">Controls</h2>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">WASD</span>
+        </div>
+        <span>Move the robot body</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">←</span>
+          <span class="guide-key">→</span>
+        </div>
+        <span>Yaw turn</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">LMB</span>
+        </div>
+        <span>Orbit camera in free view</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">RMB</span>
+        </div>
+        <span>Pan camera in free view</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">Wheel</span>
+        </div>
+        <span>Zoom camera</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">E</span>
+        </div>
+        <span>Show or hide this guide</span>
+      </div>
+    </aside>
+    <section id="editor-screen" aria-hidden="true">
+      <div class="editor-main">
+        <div class="editor-head">
+          <h2 class="editor-title">Map Editor</h2>
+        </div>
+        <p class="editor-note">Select to move. Use the colored handles on the selected box to resize width, depth, and height directly in 3D.</p>
+        <div class="editor-toolbar">
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Session</div>
+            <div class="editor-tool-grid">
+              <button id="guide-toggle-btn" type="button">E Guide</button>
+              <button id="editor-close-btn" type="button">Close</button>
+            </div>
+          </div>
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Box Editing</div>
+            <div class="editor-tool-grid">
+              <button id="editor-select-btn" type="button">Select</button>
+              <button id="editor-add-btn" type="button">Add Obstacle</button>
+              <button id="editor-delete-btn" type="button">Delete Obstacle</button>
+            </div>
+          </div>
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Robot / Spawn</div>
+            <div class="editor-tool-grid">
+              <button id="editor-spawn-btn" type="button">Set Spawn</button>
+            </div>
+          </div>
+        </div>
+        <canvas id="editor-canvas" class="editor-canvas" width="900" height="620"></canvas>
+      </div>
+      <aside class="editor-side">
+        <div class="editor-form">
+          <div class="editor-row">
+            <label>Map Width
+              <input id="editor-map-width" type="number" min="4" max="30" step="0.5" />
+            </label>
+            <label>Map Height
+              <input id="editor-map-height" type="number" min="4" max="30" step="0.5" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Obstacle Width
+              <input id="editor-obstacle-width" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+            <label>Obstacle Depth
+              <input id="editor-obstacle-depth" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Obstacle Height
+              <input id="editor-obstacle-height" type="number" min="0.1" max="2" step="0.05" />
+            </label>
+            <label>Spawn Yaw
+              <input id="editor-spawn-yaw" type="number" min="-180" max="180" step="1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box X
+              <input id="editor-box-x" type="number" step="0.1" />
+            </label>
+            <label>Box Y
+              <input id="editor-box-y" type="number" step="0.1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box Z Height
+              <input id="editor-box-elevation" type="number" min="0" max="4" step="0.05" />
+            </label>
+            <label>Box Height
+              <input id="editor-box-height" type="number" min="0.1" max="4" step="0.05" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box Width
+              <input id="editor-box-width" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+            <label>Box Depth
+              <input id="editor-box-depth" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+          </div>
+          <button id="editor-apply-btn" type="button">Apply Map Changes</button>
+          <div class="planner-status" data-role="editor-status">Choose a tool and click the map.</div>
+        </div>
+      </aside>
+    </section>
+    <script type="module" src="./viewer.js?v=20260505-camera-guide"></script>
   </body>
 </html>

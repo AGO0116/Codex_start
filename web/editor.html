@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Robot Nav Viewer - Map Editor</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05070b;
+        --panel: rgba(10, 14, 22, 0.82);
+        --panel-border: rgba(255, 255, 255, 0.08);
+        --text: #f4f7fb;
+        --muted: #8d98aa;
+        --accent: #ff7a1a;
+        --accent-soft: rgba(255, 122, 26, 0.18);
+      }
+
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(255, 122, 26, 0.2), transparent 30%),
+          linear-gradient(160deg, #020409 0%, #0c111a 48%, #05070b 100%);
+        color: var(--text);
+      }
+
+      #hud,
+      #planner-debug {
+        display: none;
+      }
+
+      button {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button.is-active {
+        background: rgba(255, 122, 26, 0.16);
+        border-color: rgba(255, 122, 26, 0.48);
+        color: #ffd9bd;
+      }
+
+      .action-button {
+        display: grid;
+        gap: 2px;
+        min-height: 58px;
+        text-align: left;
+      }
+
+      .action-button strong {
+        font-size: 13px;
+        line-height: 1.15;
+      }
+
+      .action-button span {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.2;
+      }
+
+      .spec-label {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .spec-value {
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .planner-status {
+        margin-top: 10px;
+        color: #d8e0eb;
+      }
+
+      #editor-screen {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        display: block;
+        pointer-events: none;
+      }
+
+      #editor-screen.is-visible {
+        display: block;
+      }
+
+      .editor-main,
+      .editor-side {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: rgba(10, 14, 22, 0.88);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
+      }
+
+      .editor-main {
+        position: fixed;
+        left: 18px;
+        bottom: 18px;
+        width: min(420px, calc(100vw - 36px));
+        max-height: min(46vh, calc(100vh - 36px));
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .editor-side {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        width: 340px;
+        max-height: calc(100vh - 36px);
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .editor-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .editor-title {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .editor-toolbar {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .editor-tool-group {
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+
+      .editor-tool-title {
+        margin: 0 0 8px;
+        color: #ffb176;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .editor-tool-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .editor-note {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .editor-canvas {
+        display: none;
+      }
+
+      .editor-form {
+        display: grid;
+        gap: 10px;
+      }
+
+      .editor-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        font: inherit;
+        box-sizing: border-box;
+      }
+
+      .editor-guide {
+        position: fixed;
+        left: 18px;
+        top: 18px;
+        z-index: 4;
+        width: min(280px, calc(100vw - 36px));
+        padding: 14px 16px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: rgba(10, 14, 22, 0.88);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        pointer-events: none;
+      }
+
+      .editor-guide.is-hidden {
+        display: none;
+      }
+
+      .editor-guide h3 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #ffb176;
+      }
+
+      .guide-item {
+        display: grid;
+        grid-template-columns: 88px 1fr;
+        gap: 10px;
+        align-items: center;
+        margin-top: 8px;
+        color: #d8e0eb;
+        font-size: 13px;
+      }
+
+      .guide-keys {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .guide-key {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 30px;
+        padding: 6px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        color: #f4f7fb;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+    </style>
+  </head>
+  <body data-app-mode="editor">
+    <aside class="editor-guide" data-role="control-guide" aria-hidden="false">
+      <h3>Editor Controls</h3>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">LMB</span>
+        </div>
+        <span>Select or place objects</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">Drag</span>
+        </div>
+        <span>Move the selected box on the map plane</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">LMB</span>
+          <span class="guide-key">Drag</span>
+        </div>
+        <span>Orbit on empty space</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">RMB</span>
+        </div>
+        <span>Pan the view</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">Wheel</span>
+        </div>
+        <span>Zoom in or out</span>
+      </div>
+      <div class="guide-item">
+        <div class="guide-keys">
+          <span class="guide-key">E</span>
+        </div>
+        <span>Show or hide this guide</span>
+      </div>
+    </aside>
+    <div id="hud">
+      <div data-role="platform"></div>
+      <div data-role="render"></div>
+      <div data-role="map"></div>
+      <div data-role="pose"></div>
+      <div data-role="planner-status"></div>
+      <select id="robot-select">
+        <option value="go2">Unitree Go2</option>
+        <option value="turtlebot3">TurtleBot3 Burger</option>
+      </select>
+      <button id="set-start-btn" type="button">Set Start</button>
+      <button id="set-goal-btn" type="button">Set Goal</button>
+      <button id="plan-path-btn" type="button">Plan Path</button>
+      <button id="auto-nav-btn" type="button">Start Auto</button>
+      <button id="map-edit-btn" type="button">Map Edit</button>
+    </div>
+    <aside id="planner-debug" aria-hidden="true">
+      <span data-role="debug-robot"></span>
+      <canvas id="planner-debug-canvas" width="324" height="220"></canvas>
+      <span data-role="debug-nodes"></span>
+      <span data-role="debug-edges"></span>
+      <span data-role="debug-raw"></span>
+      <span data-role="debug-final"></span>
+    </aside>
+    <section id="editor-screen" class="is-visible" aria-hidden="false">
+      <div class="editor-main">
+        <div class="editor-head">
+          <h2 class="editor-title">Map Editor</h2>
+        </div>
+        <p class="editor-note">Select to move. Use the colored handles on the selected box to resize width, depth, and height directly in 3D.</p>
+        <div class="editor-toolbar">
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Session</div>
+            <div class="editor-tool-grid">
+              <button id="guide-toggle-btn" type="button">E Guide</button>
+              <button id="editor-close-btn" type="button">Close</button>
+            </div>
+          </div>
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Box Editing</div>
+            <div class="editor-tool-grid">
+              <button id="editor-select-btn" type="button">Select</button>
+              <button id="editor-add-btn" type="button">Add Obstacle</button>
+              <button id="editor-delete-btn" type="button">Delete Obstacle</button>
+            </div>
+          </div>
+          <div class="editor-tool-group">
+            <div class="editor-tool-title">Robot / Spawn</div>
+            <div class="editor-tool-grid">
+              <button id="editor-spawn-btn" type="button">Set Spawn</button>
+            </div>
+          </div>
+        </div>
+        <canvas id="editor-canvas" class="editor-canvas" width="900" height="620"></canvas>
+      </div>
+      <aside class="editor-side">
+        <div class="editor-form">
+          <div class="editor-row">
+            <label>Map Width
+              <input id="editor-map-width" type="number" min="4" max="30" step="0.5" />
+            </label>
+            <label>Map Height
+              <input id="editor-map-height" type="number" min="4" max="30" step="0.5" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Obstacle Width
+              <input id="editor-obstacle-width" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+            <label>Obstacle Depth
+              <input id="editor-obstacle-depth" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Obstacle Height
+              <input id="editor-obstacle-height" type="number" min="0.1" max="2" step="0.05" />
+            </label>
+            <label>Spawn Yaw
+              <input id="editor-spawn-yaw" type="number" min="-180" max="180" step="1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box X
+              <input id="editor-box-x" type="number" step="0.1" />
+            </label>
+            <label>Box Y
+              <input id="editor-box-y" type="number" step="0.1" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box Z Height
+              <input id="editor-box-elevation" type="number" min="0" max="4" step="0.05" />
+            </label>
+            <label>Box Height
+              <input id="editor-box-height" type="number" min="0.1" max="4" step="0.05" />
+            </label>
+          </div>
+          <div class="editor-row">
+            <label>Box Width
+              <input id="editor-box-width" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+            <label>Box Depth
+              <input id="editor-box-depth" type="number" min="0.2" max="6" step="0.1" />
+            </label>
+          </div>
+          <button id="editor-apply-btn" type="button">Apply Map Changes</button>
+          <div class="planner-status" data-role="editor-status">Choose a tool and click the map.</div>
+        </div>
+      </aside>
+    </section>
+    <script type="module" src="./viewer.js?v=20260505-camera-guide"></script>
+  </body>
+</html>

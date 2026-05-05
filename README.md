@@ -1,138 +1,218 @@
 # robot-nav-viewer
 
-Three.js ベースの 3D ロボットビューアです。  
-Unitree Go2 を中心に、TurtleBot3 Burger も切り替えて表示でき、手動操作と簡易な自律移動デモを試せます。
+3D robot viewer and navigation sandbox for legged and wheeled robots.
 
-## Features
+This project currently focuses on:
 
-- 3D マップ表示
-- `Unitree Go2` と `TurtleBot3 Burger` の切り替え
-- Go2 の簡易歩容アニメーション
-- TurtleBot3 の差動二輪っぽい走行表現
-- `WASD + Left / Right + Space` ベースの手動操作
-- スタート / ゴール指定、経路計画、経路可視化、自律移動
-- 障害物回避、段差・階段の簡易判定
+- `Unitree Go2` as a quadruped platform
+- `TurtleBot3 Burger` as a wheeled platform
+- 3D map viewing and manual teleoperation
+- path planning and autonomous path tracking
+- a separate 3D map editor
 
-## Project Layout
+## What It Does
+
+- Renders a 3D map in the browser with obstacles, route markers, and robot models
+- Switches between `Go2` and `TurtleBot3 Burger`
+- Supports manual robot control and camera control
+- Plans routes with obstacle avoidance
+- Shows a path-planning debug panel with graph / nodes / obstacle margins
+- Opens a separate `Map Editor` screen for obstacle placement and spawn editing
+- Lets you move and resize obstacles directly in 3D
+
+## Current Robot Behavior
+
+### Unitree Go2
+
+- 3D quadruped model with jointed leg animation
+- manual locomotion with body-frame controls
+- polyline-based autonomous tracking
+- route entry from the nearest point on the planned path
+
+### TurtleBot3 Burger
+
+- STL-based wheeled robot model
+- curved autonomous tracking
+- wheel animation during motion
+
+Note:
+
+- TurtleBot3 visual alignment is still being refined. If the base, wheels, or sensor stack look slightly off, that is known work in progress.
+
+## Pages
+
+### Viewer
+
+- File: `web/index.html`
+- Purpose: robot operation, path planning, autonomous navigation, debug view
+
+### Editor
+
+- File: `web/editor.html`
+- Purpose: separate 3D map editing screen
+
+## Main Files
 
 - `web/index.html`
-  3D ビューアのエントリポイントと HUD
+  Viewer UI and HUD
+- `web/editor.html`
+  Dedicated map editor screen
 - `web/viewer.js`
-  描画、入力、ロボット切り替え、経路計画、自律移動の本体
+  Main Three.js app, robot models, controls, planning, editor interactions
 - `web/assets/go2/`
-  Go2 のメッシュと出典メモ
+  Go2 visual assets and attribution
 - `web/assets/turtlebot3/`
-  TurtleBot3 Burger のメッシュと出典メモ
+  TurtleBot3 visual assets and attribution
 - `config/go2_map.json`
-  旧 2D マップ生成スクリプト用の設定
+  Base map config
 - `scripts/create_go2_map.py`
-  SVG の 2D マップ画像を生成する補助スクリプト
+  Legacy 2D SVG map script
 
 ## Run
 
-ビルドは不要です。ローカル HTTP サーバを立てて `web/` を開いてください。
+Start a simple local server from the repository root:
 
 ```bash
 python -m http.server 8000
 ```
 
-ブラウザで次を開きます。
+Open:
 
 ```text
 http://localhost:8000/web/
 ```
 
+Open the editor directly:
+
+```text
+http://localhost:8000/web/editor.html
+```
+
 ## Requirements
 
 - Python 3
-- WebGL 対応ブラウザ
+- A browser with WebGL support
   - Google Chrome
   - Microsoft Edge
   - Firefox
   - Safari
-- インターネット接続
-  - `three` と `three/addons` を CDN から読み込みます
+- Internet access for CDN-loaded `three` / `three/addons`
 
-`requirements.txt` に追加依存がないのは、このリポジトリ自体には Python パッケージ依存がないためです。
+## Viewer Controls
 
-## Controls
+### Robot
 
-基本操作:
+- `W` move forward
+- `A` move left
+- `S` move backward
+- `D` move right
+- `Left / Right` yaw turn
+- `F` sprint
+- `Shift` sneak
+- `Space` jump
 
-- `W / A / S / D`: ロボット座標系で前後左右移動
-- `Left / Right`: yaw 回転
-- `Ctrl`: スプリント
-- `Shift`: スニーク
-- `Space`: ジャンプ
-- マウスドラッグ: 視点周回
-- マウスホイール: ズーム
+### Camera
 
-補足:
+- `Camera` button switches between follow and free view
+- In free view:
+  - `LMB` orbit
+  - `RMB` pan
+  - `Wheel` zoom
 
-- Go2 は四足ロボット向けの移動表現です
-- TurtleBot3 は差動二輪らしく、横移動を使わない前提の挙動に寄せています
+### UI
 
-## Auto Navigation
+- `E` toggles the on-screen control guide
 
-HUD の `Auto Nav` セクションから操作できます。
+## Path Planning Flow
 
-1. `Set Start` を押して始点をクリック
-2. `Set Goal` を押して終点をクリック
-3. `Plan Path` で経路生成
-4. `Start Auto` で自律移動開始
+1. `Start` places the route start marker
+2. `Goal` places the goal marker
+3. `Plan` computes a route with obstacle avoidance
+4. `Auto` starts autonomous tracking
 
-現在の経路計画は、長方形障害物をもとにした 2D の可視グラフと最短経路探索をベースにしています。  
-生成した経路は画面上に可視化され、ロボットはその経路に沿ってゆっくり追従します。
+Route display:
 
-## Robot Assets
+- `Go2` uses the polyline route
+- `TurtleBot3` uses the smoothed curve route
+
+## Editor Controls
+
+- `LMB` select objects
+- `LMB drag` move selected obstacle
+- `LMB drag on empty space` orbit camera
+- `RMB drag` pan camera
+- `Wheel` zoom
+- Colored resize handles on the selected obstacle:
+  - cyan: width
+  - orange: depth
+  - pink: height
+
+## Editor Tools
+
+### Session
+
+- `Guide`
+- `Close`
+
+### Box Editing
+
+- `Select`
+- `Add Obstacle`
+- `Delete Obstacle`
+
+### Robot / Spawn
+
+- `Set Spawn`
+
+The right-side panel edits:
+
+- map width / height
+- obstacle default size
+- selected obstacle position / size / elevation
+- robot spawn yaw
+
+## Assets
 
 ### Unitree Go2
 
-- 公式ページ  
-  https://www.unitree.com/go2/
-- 公式 ROS モデル  
-  https://github.com/unitreerobotics/unitree_ros
-- モデル配布リポジトリ  
-  https://github.com/unitreerobotics/unitree_model
-
-このリポジトリでは `web/assets/go2/ATTRIBUTION.md` に出典メモがあります。
+- Product page: https://www.unitree.com/go2/
+- ROS description: https://github.com/unitreerobotics/unitree_ros
+- Model repository: https://github.com/unitreerobotics/unitree_model
+- Attribution file: `web/assets/go2/ATTRIBUTION.md`
 
 ### TurtleBot3 Burger
 
-- 公式リポジトリ  
-  https://github.com/ROBOTIS-GIT/turtlebot3
-- 参照 URDF  
-  `turtlebot3_description/urdf/turtlebot3_burger.urdf`
+- Repository: https://github.com/ROBOTIS-GIT/turtlebot3
+- Reference URDF: `turtlebot3_description/urdf/turtlebot3_burger.urdf`
+- Attribution file: `web/assets/turtlebot3/ATTRIBUTION.md`
 
-このリポジトリでは `web/assets/turtlebot3/ATTRIBUTION.md` に出典メモがあります。
+## Legacy Script
 
-## Legacy 2D Script
-
-初期段階で使っていた 2D SVG 生成スクリプトも残しています。
+The old 2D SVG map generator is still included:
 
 ```bash
 python scripts/create_go2_map.py
 ```
 
-出力先:
+Outputs:
 
 - `output/go2_map.svg`
 
-設定:
+Uses:
 
 - `config/go2_map.json`
 
 ## Notes
 
-- このビューアは物理シミュレータではありません
-- ロボット運動は見た目とデモ用途を重視した簡易実装です
-- 自律移動も研究用途の厳密な制御器ではなく、デモ用の追従ロジックです
-- TurtleBot3 の STL 姿勢合わせは引き続き調整中です
+- This is a browser-based visualization / demo environment, not a full physics simulator
+- Path tracking and gait behavior are tuned visually and interactively
+- The editor and viewer share map state through browser storage
+- Some robot visuals, especially TurtleBot3 STL alignment, may still need refinement
 
-## Future Ideas
+## Future Work
 
-- URDF ベースのより厳密なリンク / 関節再現
-- ロボットごとの運動モデル切り替え強化
-- より自然な経路平滑化と追従制御
-- マップ編集 UI
-- ROS 連携やセンサ可視化
+- Better TurtleBot3 mesh alignment
+- More complete resize gizmos and editor handles
+- Import / export for map files
+- Cleaner module split for viewer, planner, and editor logic
+- Stronger ROS integration

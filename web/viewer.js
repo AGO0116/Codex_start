@@ -6,8 +6,9 @@ const defaultConfig = {
   map: { width_m: 10.0, height_m: 8.0 },
   go2_pose: { x_m: 3.5, y_m: 2.0, yaw_deg: 45.0 },
 };
+const mapStorageKey = "robot-nav-viewer.map-state.v1";
 
-const obstacles = [
+const initialObstacles = [
   { x: 2.0, y: 1.0, w: 3.0, d: 0.3, h: 0.45 },
   { x: 6.0, y: 3.0, w: 0.4, d: 2.5, h: 0.8 },
   { x: 1.0, y: 5.5, w: 2.8, d: 0.4, h: 0.55 },
@@ -32,6 +33,8 @@ const turtlebotBaseMeshCorrection = new THREE.Quaternion().setFromAxisAngle(
   new THREE.Vector3(1, 0, 0),
   Math.PI / 2
 );
+const turtlebotBaseVerticalOffset = 0.014;
+const turtlebotWheelCenterHeight = 0.023;
 
 const go2Spec = {
   trunk: { length: 0.3762, width: 0.0935, height: 0.114 },
@@ -99,6 +102,58 @@ const turtlebot3Spec = {
   wheelRadius: 0.033,
   wheelSeparation: 0.16,
 };
+
+function hydrateObstacleList(obstacles, nextIdStart = 1) {
+  let nextId = nextIdStart;
+  const usedIds = new Set();
+  const hydrated = obstacles.map((obstacle) => {
+    let assignedId = Number(obstacle.id);
+    if (!Number.isInteger(assignedId) || usedIds.has(assignedId) || assignedId < 1) {
+      while (usedIds.has(nextId)) {
+        nextId += 1;
+      }
+      assignedId = nextId++;
+    }
+    usedIds.add(assignedId);
+    nextId = Math.max(nextId, assignedId + 1);
+    return {
+      ...obstacle,
+      id: assignedId,
+      elevation: obstacle.elevation ?? 0,
+    };
+  });
+  return {
+    nextId,
+    obstacles: hydrated,
+  };
+}
+
+function loadStoredMapState() {
+  try {
+    const raw = window.localStorage.getItem(mapStorageKey);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredMapState(cfg, mapState) {
+  try {
+    window.localStorage.setItem(
+      mapStorageKey,
+      JSON.stringify({
+        map: cfg.map,
+        go2_pose: cfg.go2_pose,
+        obstacles: mapState.obstacles,
+      })
+    );
+  } catch {
+    // Ignore localStorage errors and keep runtime state alive.
+  }
+}
 
 async function loadConfig() {
   try {
@@ -207,9 +262,10 @@ function createMapBase(scene, cfg) {
   stripes.rotation.x = -Math.PI / 2;
   stripes.position.y = 0.015;
   mapGroup.add(stripes);
+  return mapGroup;
 }
 
-function createObstacles(scene, cfg) {
+function createObstacles(scene, cfg, obstacleList) {
   const obstacleGroup = new THREE.Group();
   const widthM = cfg.map.width_m;
   const heightM = cfg.map.height_m;
@@ -220,8 +276,9 @@ function createObstacles(scene, cfg) {
     roughness: 0.72,
     metalness: 0.18,
   });
+  const meshes = [];
 
-  for (const obstacle of obstacles) {
+  for (const obstacle of obstacleList) {
     const footprint = mapToWorld(
       obstacle.x + obstacle.w / 2,
       obstacle.y + obstacle.d / 2,
@@ -231,23 +288,27 @@ function createObstacles(scene, cfg) {
 
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(obstacle.w, obstacle.h, obstacle.d),
-      material
+      material.clone()
     );
-    mesh.position.set(footprint.x, obstacle.h / 2, footprint.z);
+    mesh.position.set(footprint.x, (obstacle.elevation ?? 0) + obstacle.h / 2, footprint.z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
+    mesh.userData.obstacleId = obstacle.id;
     obstacleGroup.add(mesh);
+    meshes.push(mesh);
     bounds.push({
       minX: footprint.x - obstacle.w / 2,
       maxX: footprint.x + obstacle.w / 2,
       minZ: footprint.z - obstacle.d / 2,
       maxZ: footprint.z + obstacle.d / 2,
-      topY: obstacle.h,
+      topY: (obstacle.elevation ?? 0) + obstacle.h,
+      bottomY: obstacle.elevation ?? 0,
+      obstacleId: obstacle.id,
     });
   }
 
   scene.add(obstacleGroup);
-  return bounds;
+  return { obstacleGroup, bounds, meshes };
 }
 
 function createScanRing() {
@@ -463,6 +524,7 @@ function createTurtlebot3Model(assets) {
   if (assets?.base) {
     const base = createTurtlebotMesh(assets.base, bodyMaterial);
     base.position.copy(urdfVectorToThree(-0.032, 0, 0));
+    base.position.y += turtlebotBaseVerticalOffset;
     applyUrdfQuaternion(base, 0, 0, 0);
     base.quaternion.multiply(turtlebotBaseMeshCorrection);
     baseFrame.add(base);
@@ -477,24 +539,29 @@ function createTurtlebot3Model(assets) {
     baseFrame.add(fallback);
   }
 
-  const wheelLeftPivot = new THREE.Group();
-  wheelLeftPivot.position.copy(urdfVectorToThree(0, 0.08, 0.023));
-  applyUrdfQuaternion(wheelLeftPivot, -1.57, 0, 0);
-  baseFrame.add(wheelLeftPivot);
+  const wheelLeftMount = new THREE.Group();
+  wheelLeftMount.position.copy(urdfVectorToThree(0, 0.08, 0.023));
+  applyUrdfQuaternion(wheelLeftMount, -1.57, 0, 0);
+  baseFrame.add(wheelLeftMount);
 
-  const wheelRightPivot = new THREE.Group();
-  wheelRightPivot.position.copy(urdfVectorToThree(0, -0.08, 0.023));
-  applyUrdfQuaternion(wheelRightPivot, -1.57, 0, 0);
-  baseFrame.add(wheelRightPivot);
+  const wheelRightMount = new THREE.Group();
+  wheelRightMount.position.copy(urdfVectorToThree(0, -0.08, 0.023));
+  applyUrdfQuaternion(wheelRightMount, -1.57, 0, 0);
+  baseFrame.add(wheelRightMount);
+
+  const wheelLeftSpin = new THREE.Group();
+  const wheelRightSpin = new THREE.Group();
+  wheelLeftMount.add(wheelLeftSpin);
+  wheelRightMount.add(wheelRightSpin);
 
   if (assets?.leftWheel) {
     const leftWheel = createTurtlebotMesh(assets.leftWheel, wheelMaterial);
-    wheelLeftPivot.add(leftWheel);
+    wheelLeftSpin.add(leftWheel);
   }
 
   if (assets?.rightWheel) {
     const rightWheel = createTurtlebotMesh(assets.rightWheel, wheelMaterial);
-    wheelRightPivot.add(rightWheel);
+    wheelRightSpin.add(rightWheel);
   }
 
   const caster = new THREE.Mesh(
@@ -514,6 +581,7 @@ function createTurtlebot3Model(assets) {
     const lidar = createTurtlebotMesh(assets.lidar, lidarMaterial);
     lidar.position.copy(urdfVectorToThree(-0.032, 0, 0.172));
     applyUrdfQuaternion(lidar, 0, 0, 0);
+    lidar.quaternion.multiply(turtlebotBaseMeshCorrection);
     baseFrame.add(lidar);
   }
 
@@ -529,8 +597,8 @@ function createTurtlebot3Model(assets) {
 
   return {
     root,
-    wheelLeftPivot,
-    wheelRightPivot,
+    wheelLeftSpin,
+    wheelRightSpin,
   };
 }
 
@@ -732,18 +800,29 @@ function placeGo2(root, cfg) {
   root.rotation.y = (-cfg.go2_pose.yaw_deg * Math.PI) / 180;
 }
 
-function createScene(cfg) {
+function createScene(cfg, obstacleList) {
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x05070b, 7, 20);
+  scene.fog = new THREE.Fog(0x05070b, 18, 54);
 
-  createMapBase(scene, cfg);
-  const obstacleBounds = createObstacles(scene, cfg);
+  const mapGroup = createMapBase(scene, cfg);
+  const { obstacleGroup, bounds: obstacleBounds, meshes: obstacleMeshes } = createObstacles(
+    scene,
+    cfg,
+    obstacleList
+  );
   createLights(scene, cfg);
 
   const scanRing = createScanRing();
   scene.add(scanRing);
 
-  return { scene, scanRing, obstacleBounds };
+  return {
+    scene,
+    scanRing,
+    obstacleBounds,
+    mapGroup,
+    obstacleGroup,
+    obstacleMeshes,
+  };
 }
 
 function updateHud(cfg, platform = "Unitree Go2") {
@@ -757,7 +836,9 @@ function updateHud(cfg, platform = "Unitree Go2") {
   }
 
   if (renderNode) {
-    renderNode.textContent = "Official DAE + URDF Rig";
+    renderNode.textContent = platform.includes("TurtleBot3")
+      ? "Wheel Robot + Navigation View"
+      : "Legged Robot + Navigation View";
   }
 
   if (mapNode) {
@@ -825,6 +906,10 @@ function evaluateSupportSurface(x, z, radius, currentSupportY, stepHeight, obsta
 
   for (const box of obstacleBounds) {
     if (!circleIntersectsAabb(x, z, radius, box)) {
+      continue;
+    }
+
+    if ((box.bottomY ?? 0) > currentSupportY + stepHeight + 1e-4) {
       continue;
     }
 
@@ -1093,22 +1178,21 @@ function pointToVector(point, y) {
   return new THREE.Vector3(point.x, y, point.z);
 }
 
-function buildPathRenderables(path) {
+function buildPathRenderables(path, robotType) {
   const group = new THREE.Group();
 
   const polyPoints = path.map((point) => pointToVector(point, 0.06));
-  const polyline = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(polyPoints),
-    new THREE.LineDashedMaterial({
-      color: 0x7ed0ff,
-      dashSize: 0.18,
-      gapSize: 0.08,
-      transparent: true,
-      opacity: 0.78,
-    })
-  );
-  polyline.computeLineDistances();
-  group.add(polyline);
+  if (robotType === "go2") {
+    const polyline = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(polyPoints),
+      new THREE.LineBasicMaterial({
+        color: 0x1d8f4d,
+        transparent: true,
+        opacity: 0.95,
+      })
+    );
+    group.add(polyline);
+  }
 
   let curvePoints = polyPoints;
   if (path.length >= 3) {
@@ -1116,15 +1200,17 @@ function buildPathRenderables(path) {
     curvePoints = curve.getPoints(Math.max(32, path.length * 18));
   }
 
-  const curveLine = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(curvePoints.map((point) => point.clone().setY(0.08))),
-    new THREE.LineBasicMaterial({
-      color: 0xffb176,
-      transparent: true,
-      opacity: 0.95,
-    })
-  );
-  group.add(curveLine);
+  if (robotType === "turtlebot3") {
+    const curveLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(curvePoints.map((point) => point.clone().setY(0.08))),
+      new THREE.LineBasicMaterial({
+        color: 0xffb176,
+        transparent: true,
+        opacity: 0.95,
+      })
+    );
+    group.add(curveLine);
+  }
 
   return group;
 }
@@ -1227,8 +1313,168 @@ function samplePathAtProgress(path, metrics, progress) {
   return path[path.length - 1];
 }
 
+function showPlannerDebugPanel(visible) {
+  const panel = document.getElementById("planner-debug");
+  if (!panel) {
+    return;
+  }
+  panel.classList.toggle("is-visible", visible);
+  panel.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function drawPlannerDebugView(debugData, cfg, robotLabel) {
+  const canvas = document.getElementById("planner-debug-canvas");
+  if (!canvas || !debugData) {
+    return;
+  }
+
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#07101a";
+  ctx.fillRect(0, 0, width, height);
+
+  const pad = 14;
+  const scale = Math.min(
+    (width - pad * 2) / cfg.map.width_m,
+    (height - pad * 2) / cfg.map.height_m
+  );
+  const mapLeft = pad;
+  const mapTop = pad;
+
+  function toCanvas(point) {
+    return {
+      x: mapLeft + (cfg.map.width_m / 2 - point.x) * scale,
+      y: mapTop + (cfg.map.height_m / 2 - point.z) * scale,
+    };
+  }
+
+  ctx.strokeStyle = "rgba(126, 208, 255, 0.18)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= cfg.map.width_m; x += 1) {
+    const canvasX = mapLeft + x * scale;
+    ctx.beginPath();
+    ctx.moveTo(canvasX, mapTop);
+    ctx.lineTo(canvasX, mapTop + cfg.map.height_m * scale);
+    ctx.stroke();
+  }
+  for (let z = 0; z <= cfg.map.height_m; z += 1) {
+    const canvasY = mapTop + z * scale;
+    ctx.beginPath();
+    ctx.moveTo(mapLeft, canvasY);
+    ctx.lineTo(mapLeft + cfg.map.width_m * scale, canvasY);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "rgba(255, 122, 26, 0.18)";
+  for (const rect of debugData.inflatedBounds) {
+    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
+    const rectWidth = (rect.maxX - rect.minX) * scale;
+    const rectHeight = (rect.maxZ - rect.minZ) * scale;
+    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
+  }
+
+  ctx.fillStyle = "rgba(159, 215, 255, 0.35)";
+  for (const rect of debugData.obstacleBounds) {
+    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
+    const rectWidth = (rect.maxX - rect.minX) * scale;
+    const rectHeight = (rect.maxZ - rect.minZ) * scale;
+    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
+  }
+
+  ctx.strokeStyle = "rgba(141, 152, 170, 0.26)";
+  ctx.lineWidth = 1;
+  for (let index = 0; index < debugData.graph.length; index += 1) {
+    const from = toCanvas(debugData.nodes[index]);
+    for (const edge of debugData.graph[index]) {
+      if (edge.to <= index) {
+        continue;
+      }
+      const to = toCanvas(debugData.nodes[edge.to]);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+  }
+
+  if (debugData.rawPath && debugData.rawPath.length >= 2) {
+    ctx.strokeStyle = "rgba(255, 122, 26, 0.68)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    debugData.rawPath.forEach((point, index) => {
+      const p = toCanvas(point);
+      if (index === 0) {
+        ctx.moveTo(p.x, p.y);
+      } else {
+        ctx.lineTo(p.x, p.y);
+      }
+    });
+    ctx.stroke();
+  }
+
+  if (debugData.path && debugData.path.length >= 2) {
+    ctx.strokeStyle = robotLabel.includes("TurtleBot3") ? "#ffb176" : "#1d8f4d";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    debugData.path.forEach((point, index) => {
+      const p = toCanvas(point);
+      if (index === 0) {
+        ctx.moveTo(p.x, p.y);
+      } else {
+        ctx.lineTo(p.x, p.y);
+      }
+    });
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#4de18b";
+  const start = toCanvas(debugData.start);
+  ctx.beginPath();
+  ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#ff7a7a";
+  const goal = toCanvas(debugData.goal);
+  ctx.beginPath();
+  ctx.arc(goal.x, goal.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#d8e0eb";
+  for (const node of debugData.nodes) {
+    const p = toCanvas(node);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const edgeCount = debugData.graph.reduce((sum, edges) => sum + edges.length, 0) / 2;
+  document.querySelector('[data-role="debug-robot"]').textContent = robotLabel;
+  document.querySelector('[data-role="debug-nodes"]').textContent = String(debugData.nodes.length);
+  document.querySelector('[data-role="debug-edges"]').textContent = String(edgeCount);
+  document.querySelector('[data-role="debug-raw"]').textContent = String(debugData.rawPath?.length ?? 0);
+  document.querySelector('[data-role="debug-final"]').textContent = String(debugData.path?.length ?? 0);
+  showPlannerDebugPanel(true);
+}
+
 async function main() {
   const cfg = await loadConfig();
+  const appMode = document.body.dataset.appMode ?? "viewer";
+  const storedMapState = loadStoredMapState();
+  if (storedMapState?.map) {
+    cfg.map = {
+      width_m: Number(storedMapState.map.width_m ?? cfg.map.width_m),
+      height_m: Number(storedMapState.map.height_m ?? cfg.map.height_m),
+    };
+  }
+  if (storedMapState?.go2_pose) {
+    cfg.go2_pose = {
+      x_m: Number(storedMapState.go2_pose.x_m ?? cfg.go2_pose.x_m),
+      y_m: Number(storedMapState.go2_pose.y_m ?? cfg.go2_pose.y_m),
+      yaw_deg: Number(storedMapState.go2_pose.yaw_deg ?? cfg.go2_pose.yaw_deg),
+    };
+  }
   updateLoadingState("Loading official Go2 assets...");
 
   let go2Assets = null;
@@ -1244,10 +1490,17 @@ async function main() {
     46,
     window.innerWidth / window.innerHeight,
     0.1,
-    100
+    180
   );
 
-  const { scene, scanRing, obstacleBounds } = createScene(cfg);
+  const hydratedObstacles = hydrateObstacleList(storedMapState?.obstacles ?? initialObstacles);
+  const mapState = {
+    nextObstacleId: hydratedObstacles.nextId,
+    obstacles: hydratedObstacles.obstacles,
+  };
+  saveStoredMapState(cfg, mapState);
+  const sceneRefs = createScene(cfg, mapState.obstacles);
+  const { scene, scanRing } = sceneRefs;
   const go2Rig = createGo2Model(go2Assets);
   const turtlebot3Rig = createTurtlebot3Model(turtlebot3Assets);
   placeGo2(go2Rig.root, cfg);
@@ -1311,13 +1564,16 @@ async function main() {
   };
   let activeRobot = robots.go2;
 
-  const halfWidth = cfg.map.width_m / 2 - 0.4;
-  const halfHeight = cfg.map.height_m / 2 - 0.4;
+  let obstacleBounds = sceneRefs.obstacleBounds;
+  let halfWidth = cfg.map.width_m / 2 - 0.4;
+  let halfHeight = cfg.map.height_m / 2 - 0.4;
   const moveDirection = new THREE.Vector3();
   const chaseOffset = new THREE.Vector3();
   const chaseLookAt = new THREE.Vector3();
   const chasePosition = new THREE.Vector3();
   const upAxis = new THREE.Vector3(0, 1, 0);
+  const cameraForward = new THREE.Vector3();
+  const cameraRight = new THREE.Vector3();
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -1326,10 +1582,20 @@ async function main() {
     azimuth: Math.PI,
     polar: 0.92,
     distance: 3.5,
+    target: new THREE.Vector3(0, 0.3, 0),
     dragging: false,
+    dragMode: "orbit",
     pointerId: null,
     lastX: 0,
     lastY: 0,
+    panPlaneY: 0,
+    panAnchor: new THREE.Vector3(),
+  };
+  const cameraState = {
+    mode: appMode === "editor" ? "free" : "follow",
+  };
+  const guideState = {
+    visible: true,
   };
   const autoCommandState = {
     forward: 0,
@@ -1345,17 +1611,45 @@ async function main() {
     polylineMetrics: null,
     smoothPath: null,
     smoothPathMetrics: null,
+    debugData: null,
     autoActive: false,
     pathProgress: 0,
     autoSegmentIndex: 1,
     autoSegmentPhase: "align",
+    autoEntryPoint: null,
+    autoEntryTargetIndex: 1,
+  };
+  const editorState = {
+    isOpen: false,
+    mode: "select",
+    selectedObstacleId: null,
+    armedObstacleId: null,
+    armedPointerId: null,
+    armedOffsetX: 0,
+    armedOffsetY: 0,
+    armedStartX: 0,
+    armedStartY: 0,
+    armedPlaneY: 0,
+    draggingObstacleId: null,
+    dragPointerId: null,
+    dragOffsetX: 0,
+    dragOffsetY: 0,
+    resizingHandleAxis: null,
+    resizePointerId: null,
+    resizeObstacleId: null,
+    resizePlaneY: 0,
+    resizeStartClientY: 0,
+    resizeBaseHeight: 0,
   };
   const startMarker = createMarker(0x4de18b, 0.1, 0.12);
   const goalMarker = createMarker(0xff7a7a, 0.1, 0.12);
   const routeGroup = new THREE.Group();
+  const selectionOverlayGroup = new THREE.Group();
+  const selectionHandleMeshes = [];
   scene.add(startMarker);
   scene.add(goalMarker);
   scene.add(routeGroup);
+  scene.add(selectionOverlayGroup);
 
   function syncActiveRobotTransform() {
     for (const robot of Object.values(robots)) {
@@ -1377,8 +1671,33 @@ async function main() {
     motionState.isGrounded = true;
     motionState.groundOffset = activeRobot.groundOffset;
     syncActiveRobotTransform();
+    if (plannerState.path) {
+      clearRouteRender();
+      routeGroup.add(buildPathRenderables(plannerState.path, activeRobot.type));
+      if (plannerState.debugData) {
+        drawPlannerDebugView(plannerState.debugData, cfg, activeRobot.label);
+      }
+    }
     updateHud(cfg, activeRobot.label);
     updatePlannerStatus(`${activeRobot.label} selected.`);
+  }
+
+  function resetRobotsToConfigPose() {
+    placeGo2(go2Rig.root, cfg);
+    placeGo2(turtlebot3Rig.root, cfg);
+    motionState.x = go2Rig.root.position.x;
+    motionState.z = go2Rig.root.position.z;
+    motionState.yaw = go2Rig.root.rotation.y;
+    motionState.jumpY = 0;
+    motionState.velocityY = 0;
+    motionState.isGrounded = true;
+    motionState.supportY = 0;
+    motionState.groundOffset = activeRobot.groundOffset;
+    syncActiveRobotTransform();
+    const startPoint = worldToMapPoint(activeRobot.root.position);
+    plannerState.start = startPoint;
+    setMarkerPosition(startMarker, startPoint, motionState.supportY);
+    clearPathState();
   }
 
   function setPlannerMode(mode) {
@@ -1396,6 +1715,354 @@ async function main() {
     marker.visible = true;
   }
 
+  function refreshSceneGeometry() {
+    if (sceneRefs.mapGroup) {
+      scene.remove(sceneRefs.mapGroup);
+    }
+    if (sceneRefs.obstacleGroup) {
+      scene.remove(sceneRefs.obstacleGroup);
+    }
+    sceneRefs.mapGroup = createMapBase(scene, cfg);
+    const obstacleResult = createObstacles(scene, cfg, mapState.obstacles);
+    sceneRefs.obstacleGroup = obstacleResult.obstacleGroup;
+    obstacleBounds = obstacleResult.bounds;
+    sceneRefs.obstacleBounds = obstacleBounds;
+    sceneRefs.obstacleMeshes = obstacleResult.meshes;
+    halfWidth = cfg.map.width_m / 2 - 0.4;
+    halfHeight = cfg.map.height_m / 2 - 0.4;
+    rebuildSelectionOverlay();
+  }
+
+  function clearPathState() {
+    plannerState.path = null;
+    plannerState.polylineMetrics = null;
+    plannerState.smoothPath = null;
+    plannerState.smoothPathMetrics = null;
+    plannerState.debugData = null;
+    plannerState.autoSegmentPhase = "align";
+    plannerState.autoEntryPoint = null;
+    plannerState.autoEntryTargetIndex = 1;
+    clearRouteRender();
+    showPlannerDebugPanel(false);
+    stopAutoNav();
+  }
+
+  function updateEditorStatus(text) {
+    const node = document.querySelector('[data-role="editor-status"]');
+    if (node) {
+      node.textContent = text;
+    }
+  }
+
+  function clampOrbitTarget() {
+    orbitState.target.x = clamp(orbitState.target.x, -cfg.map.width_m * 0.85, cfg.map.width_m * 0.85);
+    orbitState.target.z = clamp(orbitState.target.z, -cfg.map.height_m * 0.85, cfg.map.height_m * 0.85);
+    orbitState.target.y = clamp(orbitState.target.y, 0.05, 3.5);
+  }
+
+  function syncCameraModeButton() {
+    const button = document.getElementById("camera-mode-btn");
+    if (!button) {
+      return;
+    }
+    button.innerHTML =
+      cameraState.mode === "follow"
+        ? "<strong>Camera</strong><span>Follow view</span>"
+        : "<strong>Camera</strong><span>Free view</span>";
+    button.classList.toggle("is-active", cameraState.mode === "free");
+  }
+
+  function setCameraMode(mode) {
+    cameraState.mode = mode;
+    if (mode === "free") {
+      orbitState.target.set(motionState.x, 0.32, motionState.z);
+      clampOrbitTarget();
+    }
+    syncCameraModeButton();
+  }
+
+  function syncGuideVisibility() {
+    const guide = document.querySelector('[data-role="control-guide"]');
+    if (guide) {
+      guide.classList.toggle("is-hidden", !guideState.visible);
+      guide.setAttribute("aria-hidden", guideState.visible ? "false" : "true");
+    }
+    const button = document.getElementById("guide-toggle-btn");
+    if (button) {
+      button.innerHTML = guideState.visible
+        ? "<strong>Guide</strong><span>Hide help panel</span>"
+        : "<strong>Guide</strong><span>Show help with E</span>";
+      button.classList.toggle("is-active", guideState.visible);
+    }
+  }
+
+  function toggleGuideVisibility() {
+    guideState.visible = !guideState.visible;
+    syncGuideVisibility();
+  }
+
+  function hydrateHudButtons() {
+    const controlsNode = document.querySelector(".controls");
+    if (controlsNode) {
+      controlsNode.remove();
+    }
+
+    const buttonContent = {
+      "camera-mode-btn": ["Camera", "Follow or free view"],
+      "guide-toggle-btn": ["Guide", "Toggle help with E"],
+      "set-start-btn": ["Start", "Place route start"],
+      "set-goal-btn": ["Goal", "Place route goal"],
+      "plan-path-btn": ["Plan", "Build shortest path"],
+      "auto-nav-btn": ["Auto", "Start or stop tracking"],
+      "map-edit-btn": ["Map Edit", "Open 3D editor"],
+      "editor-select-btn": ["Select", "Pick and move"],
+      "editor-add-btn": ["Add", "Place obstacle"],
+      "editor-delete-btn": ["Delete", "Remove obstacle"],
+      "editor-spawn-btn": ["Spawn", "Set robot start"],
+      "editor-close-btn": ["Close", "Return to viewer"],
+      "editor-apply-btn": ["Apply", "Save map changes"],
+    };
+
+    for (const [id, [title, subtitle]] of Object.entries(buttonContent)) {
+      const button = document.getElementById(id);
+      if (!button) {
+        continue;
+      }
+      button.classList.add("action-button");
+      button.innerHTML = `<strong>${title}</strong><span>${subtitle}</span>`;
+    }
+
+    const startButton = document.getElementById("set-start-btn");
+    if (startButton) {
+      startButton.classList.add("with-icon");
+      startButton.innerHTML =
+        '<div class="button-copy"><strong>Start</strong><span>Place route start</span></div><span class="button-icon start" aria-hidden="true"></span>';
+    }
+
+    const goalButton = document.getElementById("set-goal-btn");
+    if (goalButton) {
+      goalButton.classList.add("with-icon");
+      goalButton.innerHTML =
+        '<div class="button-copy"><strong>Goal</strong><span>Place route goal</span></div><span class="button-icon goal" aria-hidden="true"></span>';
+    }
+
+    document.getElementById("set-start-btn")?.classList.add("route-button");
+    document.getElementById("set-goal-btn")?.classList.add("route-button");
+    document.getElementById("plan-path-btn")?.classList.add("route-button");
+    document.getElementById("auto-nav-btn")?.classList.add("route-button");
+    document.getElementById("map-edit-btn")?.classList.add("accent-button");
+  }
+
+  function hydrateGuidePanel() {
+    const guide = document.querySelector('[data-role="control-guide"]');
+    if (!guide) {
+      return;
+    }
+
+    const viewerItems = [
+      [["W"], "Move forward"],
+      [["A"], "Move left"],
+      [["S"], "Move backward"],
+      [["D"], "Move right"],
+      [["Left", "Right"], "Yaw turn"],
+      [["LMB"], "Orbit camera in free view"],
+      [["RMB"], "Pan camera in free view"],
+      [["Wheel"], "Zoom camera"],
+      [["F"], "Sprint forward"],
+      [["Shift"], "Sneak"],
+      [["Space"], "Jump"],
+      [["Start"], "Place route start"],
+      [["Goal"], "Place route goal"],
+      [["Plan"], "Build shortest path"],
+      [["Auto"], "Run autonomous path tracking"],
+      [["Map Edit"], "Open the 3D map editor"],
+      [["E"], "Show or hide this guide"],
+    ];
+    const editorItems = [
+      [["LMB"], "Select or place objects"],
+      [["Drag"], "Move the selected box on the map plane"],
+      [["LMB", "Empty"], "Orbit on empty space"],
+      [["RMB"], "Pan the view"],
+      [["Wheel"], "Zoom in or out"],
+      [["Apply"], "Save the edited map"],
+      [["Close"], "Return to the robot viewer"],
+      [["E"], "Show or hide this guide"],
+    ];
+    const items = appMode === "editor" ? editorItems : viewerItems;
+
+    guide.innerHTML = [
+      `<h3 class="guide-title">Controls</h3>`,
+      ...items.map(
+        ([keys, text]) => `
+      <div class="guide-item">
+        <div class="guide-keys">${keys
+          .map((key) => `<span class="guide-key">${key}</span>`)
+          .join("")}</div>
+        <span>${text}</span>
+      </div>`
+      ),
+    ].join("");
+  }
+
+  function syncEditorForm() {
+    document.getElementById("editor-map-width").value = cfg.map.width_m.toFixed(1);
+    document.getElementById("editor-map-height").value = cfg.map.height_m.toFixed(1);
+    document.getElementById("editor-obstacle-width").value = "0.8";
+    document.getElementById("editor-obstacle-depth").value = "0.8";
+    document.getElementById("editor-obstacle-height").value = "0.6";
+    document.getElementById("editor-spawn-yaw").value = String(cfg.go2_pose.yaw_deg ?? 0);
+    syncSelectedObstacleInputs();
+  }
+
+  function drawEditorView() {
+    const canvas = document.getElementById("editor-canvas");
+    if (!canvas) {
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#07101a";
+    ctx.fillRect(0, 0, width, height);
+
+    const pad = 24;
+    const scale = Math.min(
+      (width - pad * 2) / cfg.map.width_m,
+      (height - pad * 2) / cfg.map.height_m
+    );
+    const mapLeft = pad;
+    const mapTop = pad;
+
+    function toCanvasMap(point) {
+      return {
+        x: mapLeft + point.x * scale,
+        y: mapTop + point.y * scale,
+      };
+    }
+
+    ctx.strokeStyle = "rgba(126, 208, 255, 0.16)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= cfg.map.width_m; x += 1) {
+      const xPos = mapLeft + x * scale;
+      ctx.beginPath();
+      ctx.moveTo(xPos, mapTop);
+      ctx.lineTo(xPos, mapTop + cfg.map.height_m * scale);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= cfg.map.height_m; y += 1) {
+      const yPos = mapTop + y * scale;
+      ctx.beginPath();
+      ctx.moveTo(mapLeft, yPos);
+      ctx.lineTo(mapLeft + cfg.map.width_m * scale, yPos);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = "rgba(159, 215, 255, 0.75)";
+    for (const obstacle of mapState.obstacles) {
+      const point = toCanvasMap({ x: obstacle.x, y: obstacle.y });
+      ctx.fillRect(point.x, point.y, obstacle.w * scale, obstacle.d * scale);
+    }
+
+    const spawn = toCanvasMap({
+      x: cfg.go2_pose.x_m,
+      y: cfg.go2_pose.y_m,
+    });
+    ctx.fillStyle = "#4de18b";
+    ctx.beginPath();
+    ctx.arc(spawn.x, spawn.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#4de18b";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(spawn.x, spawn.y);
+    ctx.lineTo(
+      spawn.x + Math.cos((-cfg.go2_pose.yaw_deg * Math.PI) / 180) * 16,
+      spawn.y + Math.sin((-cfg.go2_pose.yaw_deg * Math.PI) / 180) * 16
+    );
+    ctx.stroke();
+  }
+
+  function resetEditorCamera() {
+    orbitState.azimuth = Math.PI * 0.84;
+    orbitState.polar = 0.88;
+    orbitState.distance = clamp(Math.max(cfg.map.width_m, cfg.map.height_m) * 0.78, 5.2, 16);
+    orbitState.target.set(0, 0.28, 0);
+    clampOrbitTarget();
+  }
+
+  function clampEditorCameraTarget() {
+    clampOrbitTarget();
+  }
+
+  function showEditorScreen(visible) {
+    const screen = document.getElementById("editor-screen");
+    screen.classList.toggle("is-visible", visible);
+    screen.setAttribute("aria-hidden", visible ? "false" : "true");
+    editorState.isOpen = visible;
+    if (visible) {
+      resetEditorCamera();
+      syncEditorForm();
+      drawEditorView();
+      updateEditorStatus("Left drag orbits on empty space. Right drag pans. Click a box to select or move it.");
+      setEditorMode("select");
+      clearPathState();
+      rebuildSelectionOverlay();
+    }
+  }
+
+  function editorCanvasToMapPoint(event) {
+    const canvas = document.getElementById("editor-canvas");
+    const rect = canvas.getBoundingClientRect();
+    const pad = 24;
+    const scale = Math.min(
+      (canvas.width - pad * 2) / cfg.map.width_m,
+      (canvas.height - pad * 2) / cfg.map.height_m
+    );
+    const x = clamp((event.clientX - rect.left - pad) / rect.width * canvas.width / scale, 0, cfg.map.width_m);
+    const y = clamp((event.clientY - rect.top - pad) / rect.height * canvas.height / scale, 0, cfg.map.height_m);
+    return { x, y };
+  }
+
+  function setEditorMode(mode) {
+    editorState.mode = mode;
+    editorState.armedObstacleId = null;
+    editorState.armedPointerId = null;
+    editorState.draggingObstacleId = null;
+    editorState.dragPointerId = null;
+    setButtonActive("editor-select-btn", mode === "select");
+    setButtonActive("editor-add-btn", mode === "add");
+    setButtonActive("editor-delete-btn", mode === "delete");
+    setButtonActive("editor-spawn-btn", mode === "spawn");
+  }
+
+  function applyMapChangesFromEditor() {
+    const nextWidth = Number(document.getElementById("editor-map-width").value);
+    const nextHeight = Number(document.getElementById("editor-map-height").value);
+    const nextYaw = Number(document.getElementById("editor-spawn-yaw").value);
+    cfg.map.width_m = clamp(Number.isFinite(nextWidth) ? nextWidth : cfg.map.width_m, 4, 30);
+    cfg.map.height_m = clamp(Number.isFinite(nextHeight) ? nextHeight : cfg.map.height_m, 4, 30);
+    cfg.go2_pose.yaw_deg = clamp(Number.isFinite(nextYaw) ? nextYaw : cfg.go2_pose.yaw_deg, -180, 180);
+    mapState.obstacles = mapState.obstacles.map((obstacle) => ({
+      ...obstacle,
+      x: clamp(obstacle.x, 0, Math.max(0, cfg.map.width_m - obstacle.w)),
+      y: clamp(obstacle.y, 0, Math.max(0, cfg.map.height_m - obstacle.d)),
+      elevation: clamp(obstacle.elevation ?? 0, 0, 4),
+    }));
+    cfg.go2_pose.x_m = clamp(cfg.go2_pose.x_m, 0, cfg.map.width_m);
+    cfg.go2_pose.y_m = clamp(cfg.go2_pose.y_m, 0, cfg.map.height_m);
+
+    refreshSceneGeometry();
+    clampEditorCameraTarget();
+    resetRobotsToConfigPose();
+    setPlannerMode(null);
+    updateHud(cfg, activeRobot.label);
+    drawEditorView();
+    saveStoredMapState(cfg, mapState);
+    selectObstacle(editorState.selectedObstacleId);
+    updateEditorStatus("Map changes applied.");
+  }
+
   function getSupportHeightAt(point) {
     return evaluateSupportSurface(
       point.x,
@@ -1411,23 +2078,148 @@ async function main() {
     return { x: position.x, z: position.z };
   }
 
+  function mapCoordsToWorldPoint(x, y) {
+    return mapToWorld(x, y, cfg.map.width_m, cfg.map.height_m);
+  }
+
+  function worldToMapCoords(x, z) {
+    return {
+      x: x + cfg.map.width_m / 2,
+      y: z + cfg.map.height_m / 2,
+    };
+  }
+
+  function getObstacleById(id) {
+    return mapState.obstacles.find((obstacle) => obstacle.id === id) ?? null;
+  }
+
+  function rebuildSelectionOverlay() {
+    selectionOverlayGroup.clear();
+    selectionHandleMeshes.length = 0;
+
+    if (!editorState.isOpen || !editorState.selectedObstacleId) {
+      return;
+    }
+
+    const obstacle = getObstacleById(editorState.selectedObstacleId);
+    if (!obstacle) {
+      return;
+    }
+
+    const footprint = mapToWorld(
+      obstacle.x + obstacle.w / 2,
+      obstacle.y + obstacle.d / 2,
+      cfg.map.width_m,
+      cfg.map.height_m
+    );
+    const centerY = (obstacle.elevation ?? 0) + obstacle.h / 2;
+
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(obstacle.w, obstacle.h, obstacle.d)),
+      new THREE.LineBasicMaterial({ color: 0xf6ff7a, transparent: true, opacity: 0.95 })
+    );
+    outline.position.set(footprint.x, centerY, footprint.z);
+    selectionOverlayGroup.add(outline);
+
+    const highlightShell = new THREE.Mesh(
+      new THREE.BoxGeometry(obstacle.w * 1.01, obstacle.h * 1.01, obstacle.d * 1.01),
+      new THREE.MeshBasicMaterial({
+        color: 0xefff7a,
+        transparent: true,
+        opacity: 0.08,
+        depthWrite: false,
+      })
+    );
+    highlightShell.position.copy(outline.position);
+    selectionOverlayGroup.add(highlightShell);
+
+    const handleSpecs = [
+      {
+        axis: "x",
+        color: 0x41e6ff,
+        position: [footprint.x + obstacle.w / 2, centerY, footprint.z],
+      },
+      {
+        axis: "z",
+        color: 0xff9a3d,
+        position: [footprint.x, centerY, footprint.z + obstacle.d / 2],
+      },
+      {
+        axis: "y",
+        color: 0xff5fc8,
+        position: [footprint.x, (obstacle.elevation ?? 0) + obstacle.h, footprint.z],
+      },
+    ];
+
+    for (const spec of handleSpecs) {
+      const handle = new THREE.Mesh(
+        new THREE.SphereGeometry(0.085, 18, 18),
+        new THREE.MeshStandardMaterial({
+          color: spec.color,
+          emissive: spec.color,
+          emissiveIntensity: 0.55,
+          roughness: 0.28,
+          metalness: 0.08,
+        })
+      );
+      handle.position.set(...spec.position);
+      handle.userData.handleAxis = spec.axis;
+      handle.userData.obstacleId = obstacle.id;
+      selectionOverlayGroup.add(handle);
+      selectionHandleMeshes.push(handle);
+    }
+  }
+
+  function syncSelectedObstacleInputs() {
+    const obstacle = getObstacleById(editorState.selectedObstacleId);
+    const fields = [
+      "editor-box-x",
+      "editor-box-y",
+      "editor-box-elevation",
+      "editor-box-height",
+      "editor-box-width",
+      "editor-box-depth",
+    ];
+    if (!obstacle) {
+      for (const id of fields) {
+        const input = document.getElementById(id);
+        if (input) {
+          input.value = "";
+        }
+      }
+      return;
+    }
+    document.getElementById("editor-box-x").value = obstacle.x.toFixed(2);
+    document.getElementById("editor-box-y").value = obstacle.y.toFixed(2);
+    document.getElementById("editor-box-elevation").value = (obstacle.elevation ?? 0).toFixed(2);
+    document.getElementById("editor-box-height").value = obstacle.h.toFixed(2);
+    document.getElementById("editor-box-width").value = obstacle.w.toFixed(2);
+    document.getElementById("editor-box-depth").value = obstacle.d.toFixed(2);
+  }
+
+  function selectObstacle(id) {
+    editorState.selectedObstacleId = id;
+    for (const mesh of sceneRefs.obstacleMeshes ?? []) {
+      const isSelected = mesh.userData.obstacleId === id;
+      mesh.material.emissive.setHex(isSelected ? 0xd7ff5a : 0x000000);
+      mesh.material.emissiveIntensity = isSelected ? 0.68 : 0;
+      mesh.material.color.setHex(isSelected ? 0xc8f4ff : 0x9fd7ff);
+    }
+    rebuildSelectionOverlay();
+    syncSelectedObstacleInputs();
+  }
+
   function clearPlannedPath() {
-    plannerState.path = null;
-    plannerState.polylineMetrics = null;
-    plannerState.smoothPath = null;
-    plannerState.smoothPathMetrics = null;
-    plannerState.autoSegmentPhase = "align";
-    clearRouteRender();
-    stopAutoNav();
+    clearPathState();
   }
 
   function setStartToRobotPosition() {
     const startPoint = worldToMapPoint(activeRobot.root.position);
     plannerState.start = startPoint;
     setMarkerPosition(startMarker, startPoint, motionState.supportY);
-    clearPlannedPath();
-    setPlannerMode(null);
-    updatePlannerStatus("Start point set to robot position.");
+    clearPathState();
+    setPlannerMode("start");
+    updatePlannerStatus("Start point set to robot position. Click the map to move it.");
   }
 
   function planCurrentPath() {
@@ -1458,9 +2250,11 @@ async function main() {
       plannerState.polylineMetrics = null;
       plannerState.smoothPath = null;
       plannerState.smoothPathMetrics = null;
+      plannerState.debugData = null;
       plannerState.autoActive = false;
       plannerState.autoSegmentPhase = "align";
       clearRouteRender();
+      showPlannerDebugPanel(false);
       updatePlannerStatus("No collision-free path found.");
       return;
     }
@@ -1469,11 +2263,22 @@ async function main() {
     plannerState.polylineMetrics = computePathMetrics(plannerState.path);
     plannerState.smoothPath = buildSmoothPath(plannerState.path);
     plannerState.smoothPathMetrics = computePathMetrics(plannerState.smoothPath);
+    plannerState.debugData = {
+      start: plannerState.start,
+      goal: plannerState.goal,
+      nodes,
+      graph,
+      rawPath,
+      path: plannerState.path,
+      obstacleBounds,
+      inflatedBounds,
+    };
     plannerState.autoActive = false;
     plannerState.autoSegmentIndex = 1;
     plannerState.autoSegmentPhase = "align";
     clearRouteRender();
-    routeGroup.add(buildPathRenderables(plannerState.path));
+    routeGroup.add(buildPathRenderables(plannerState.path, activeRobot.type));
+    drawPlannerDebugView(plannerState.debugData, cfg, activeRobot.label);
 
     const totalLength = plannerState.path.reduce((sum, point, index) => {
       if (index === 0) {
@@ -1495,15 +2300,27 @@ async function main() {
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
     autoCommandState.speed = 0;
+    showPlannerDebugPanel(false);
     const currentPoint = { x: motionState.x, z: motionState.z };
     if (activeRobot.type === "go2") {
-      plannerState.pathProgress = 0;
-      plannerState.autoSegmentIndex = Math.min(1, plannerState.path.length - 1);
-      const startDistance = Math.hypot(
-        plannerState.path[0].x - motionState.x,
-        plannerState.path[0].z - motionState.z
+      const projection = projectPointOntoPath(
+        currentPoint,
+        plannerState.path,
+        plannerState.polylineMetrics
       );
-      plannerState.autoSegmentPhase = startDistance > 0.08 ? "startAlign" : "align";
+      plannerState.pathProgress = projection.progress;
+      plannerState.autoEntryPoint = { x: projection.point.x, z: projection.point.z };
+      plannerState.autoEntryTargetIndex = clamp(
+        projection.segmentIndex + 1,
+        1,
+        plannerState.path.length - 1
+      );
+      plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
+      const entryDistance = Math.hypot(
+        projection.point.x - motionState.x,
+        projection.point.z - motionState.z
+      );
+      plannerState.autoSegmentPhase = entryDistance > 0.08 ? "startAlign" : "align";
     } else {
       if (!plannerState.smoothPath || !plannerState.smoothPathMetrics) {
         updatePlannerStatus("Plan a smooth path before starting auto nav.");
@@ -1529,6 +2346,8 @@ async function main() {
     plannerState.pathProgress = 0;
     plannerState.autoSegmentIndex = 1;
     plannerState.autoSegmentPhase = "align";
+    plannerState.autoEntryPoint = null;
+    plannerState.autoEntryTargetIndex = 1;
     autoCommandState.forward = 0;
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
@@ -1549,6 +2368,15 @@ async function main() {
 
   function onKeyChange(event, isPressed) {
     const key = event.code;
+    const tagName = event.target?.tagName ?? "";
+    const isTypingTarget =
+      tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT" || event.target?.isContentEditable;
+
+    if (key === "KeyE" && isPressed && !event.repeat && !isTypingTarget) {
+      event.preventDefault();
+      toggleGuideVisibility();
+      return;
+    }
 
     if (
       [
@@ -1556,11 +2384,10 @@ async function main() {
         "KeyA",
         "KeyS",
         "KeyD",
+        "KeyF",
         "ArrowLeft",
         "ArrowRight",
         "Space",
-        "ControlLeft",
-        "ControlRight",
         "ShiftLeft",
         "ShiftRight",
       ].includes(key)
@@ -1568,13 +2395,17 @@ async function main() {
       event.preventDefault();
     }
 
+    if (isTypingTarget) {
+      return;
+    }
+
     if (key === "KeyW") inputState.forward = isPressed;
     if (key === "KeyS") inputState.backward = isPressed;
     if (key === "KeyA") inputState.left = isPressed;
     if (key === "KeyD") inputState.right = isPressed;
+    if (key === "KeyF") inputState.sprint = isPressed;
     if (key === "ArrowLeft") inputState.turnLeft = isPressed;
     if (key === "ArrowRight") inputState.turnRight = isPressed;
-    if (key === "ControlLeft" || key === "ControlRight") inputState.sprint = isPressed;
     if (key === "ShiftLeft" || key === "ShiftRight") inputState.sneak = isPressed;
 
     if (key === "Space" && isPressed && motionState.isGrounded && activeRobot.canJump) {
@@ -1586,13 +2417,152 @@ async function main() {
   window.addEventListener("keydown", (event) => onKeyChange(event, true));
   window.addEventListener("keyup", (event) => onKeyChange(event, false));
 
-  function onPointerDown(event) {
-    if (plannerState.mode) {
-      const rect = renderer.domElement.getBoundingClientRect();
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
+  function setPointerFromEvent(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+  }
 
+  function intersectGroundPlaneAtY(y) {
+    const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -y);
+    return raycaster.ray.intersectPlane(dragPlane, planeHit);
+  }
+
+  function beginCameraDrag(event, dragMode) {
+    orbitState.dragging = true;
+    orbitState.dragMode = dragMode;
+    orbitState.pointerId = event.pointerId;
+    orbitState.lastX = event.clientX;
+    orbitState.lastY = event.clientY;
+    if (dragMode === "pan") {
+      orbitState.panPlaneY = 0;
+    }
+    renderer.domElement.setPointerCapture(event.pointerId);
+  }
+
+  function onPointerDown(event) {
+    setPointerFromEvent(event);
+
+    if (editorState.isOpen) {
+      if (event.button === 2) {
+        beginCameraDrag(event, "pan");
+        return;
+      }
+
+      const handleHits = raycaster.intersectObjects(selectionHandleMeshes, false);
+      if (editorState.mode === "select" && handleHits.length > 0) {
+        const handle = handleHits[0].object;
+        const obstacle = getObstacleById(handle.userData.obstacleId);
+        if (obstacle) {
+          selectObstacle(obstacle.id);
+          editorState.resizingHandleAxis = handle.userData.handleAxis;
+          editorState.resizePointerId = event.pointerId;
+          editorState.resizeObstacleId = obstacle.id;
+          editorState.resizePlaneY = (obstacle.elevation ?? 0) + obstacle.h / 2;
+          editorState.resizeStartClientY = event.clientY;
+          editorState.resizeBaseHeight = obstacle.h;
+          renderer.domElement.setPointerCapture(event.pointerId);
+          updateEditorStatus(
+            handle.userData.handleAxis === "x"
+              ? "Drag the cyan handle to change width."
+              : handle.userData.handleAxis === "z"
+                ? "Drag the orange handle to change depth."
+                : "Drag the pink handle to change height."
+          );
+          return;
+        }
+      }
+
+      const hits = raycaster.intersectObjects(sceneRefs.obstacleMeshes ?? [], false);
+      if (editorState.mode === "select") {
+        if (hits.length > 0) {
+          const obstacleId = hits[0].object.userData.obstacleId;
+          const obstacle = getObstacleById(obstacleId);
+          selectObstacle(obstacleId);
+          if (obstacle) {
+            const center = {
+              x: obstacle.x + obstacle.w / 2,
+              y: obstacle.y + obstacle.d / 2,
+            };
+            const groundHit = intersectGroundPlaneAtY(obstacle.elevation ?? 0);
+            if (groundHit) {
+              const mapPoint = worldToMapCoords(planeHit.x, planeHit.z);
+              editorState.armedObstacleId = obstacleId;
+              editorState.armedPointerId = event.pointerId;
+              editorState.armedOffsetX = center.x - mapPoint.x;
+              editorState.armedOffsetY = center.y - mapPoint.y;
+              editorState.armedStartX = event.clientX;
+              editorState.armedStartY = event.clientY;
+              editorState.armedPlaneY = obstacle.elevation ?? 0;
+              renderer.domElement.setPointerCapture(event.pointerId);
+            }
+          }
+        } else {
+          selectObstacle(null);
+          if (event.button === 0) {
+            beginCameraDrag(event, "orbit");
+          }
+        }
+        return;
+      }
+
+      if (editorState.mode === "delete") {
+        if (hits.length > 0) {
+          mapState.obstacles = mapState.obstacles.filter(
+            (obstacle) => obstacle.id !== hits[0].object.userData.obstacleId
+          );
+          if (editorState.selectedObstacleId === hits[0].object.userData.obstacleId) {
+            selectObstacle(null);
+          }
+          refreshSceneGeometry();
+          clearPathState();
+          drawEditorView();
+          updateEditorStatus("Obstacle deleted.");
+        }
+        return;
+      }
+
+      if (!intersectGroundPlaneAtY(0)) {
+        return;
+      }
+
+      const mapPoint = worldToMapCoords(planeHit.x, planeHit.z);
+      if (editorState.mode === "spawn") {
+        cfg.go2_pose.x_m = Number(clamp(mapPoint.x, 0, cfg.map.width_m).toFixed(2));
+        cfg.go2_pose.y_m = Number(clamp(mapPoint.y, 0, cfg.map.height_m).toFixed(2));
+        drawEditorView();
+        updateEditorStatus("Spawn point moved.");
+        return;
+      }
+
+      if (editorState.mode === "add") {
+        const w = clamp(Number(document.getElementById("editor-obstacle-width").value) || 0.8, 0.2, 6);
+        const d = clamp(Number(document.getElementById("editor-obstacle-depth").value) || 0.8, 0.2, 6);
+        const h = clamp(Number(document.getElementById("editor-obstacle-height").value) || 0.6, 0.1, 4);
+        const obstacle = {
+          id: mapState.nextObstacleId++,
+          x: clamp(mapPoint.x - w / 2, 0, Math.max(0, cfg.map.width_m - w)),
+          y: clamp(mapPoint.y - d / 2, 0, Math.max(0, cfg.map.height_m - d)),
+          w,
+          d,
+          h,
+          elevation: 0,
+        };
+        mapState.obstacles.push(obstacle);
+        refreshSceneGeometry();
+        selectObstacle(obstacle.id);
+        clearPathState();
+        drawEditorView();
+        updateEditorStatus("Obstacle added.");
+        return;
+      }
+    }
+
+    if (plannerState.mode) {
+      if (event.button !== 0) {
+        return;
+      }
       if (raycaster.ray.intersectPlane(floorPlane, planeHit)) {
         const clampedPoint = {
           x: clamp(planeHit.x, -halfWidth, halfWidth),
@@ -1620,14 +2590,101 @@ async function main() {
       return;
     }
 
-    orbitState.dragging = true;
-    orbitState.pointerId = event.pointerId;
-    orbitState.lastX = event.clientX;
-    orbitState.lastY = event.clientY;
-    renderer.domElement.setPointerCapture(event.pointerId);
+    if (event.button === 2) {
+      if (cameraState.mode === "free") {
+        beginCameraDrag(event, "pan");
+      }
+      return;
+    }
+    if (event.button === 0) {
+      beginCameraDrag(event, "orbit");
+    }
   }
 
   function onPointerMove(event) {
+    if (
+      editorState.isOpen &&
+      editorState.resizePointerId === event.pointerId &&
+      editorState.resizingHandleAxis
+    ) {
+      const obstacle = getObstacleById(editorState.resizeObstacleId);
+      if (!obstacle) {
+        return;
+      }
+
+      if (editorState.resizingHandleAxis === "x" || editorState.resizingHandleAxis === "z") {
+        setPointerFromEvent(event);
+        if (intersectGroundPlaneAtY(editorState.resizePlaneY)) {
+          const mapPoint = worldToMapCoords(planeHit.x, planeHit.z);
+          if (editorState.resizingHandleAxis === "x") {
+            const maxX = clamp(mapPoint.x, obstacle.x + 0.2, cfg.map.width_m);
+            obstacle.w = clamp(maxX - obstacle.x, 0.2, 6);
+          } else {
+            const maxY = clamp(mapPoint.y, obstacle.y + 0.2, cfg.map.height_m);
+            obstacle.d = clamp(maxY - obstacle.y, 0.2, 6);
+          }
+        }
+      } else if (editorState.resizingHandleAxis === "y") {
+        const deltaY = event.clientY - editorState.resizeStartClientY;
+        obstacle.h = clamp(editorState.resizeBaseHeight - deltaY * 0.01, 0.1, 4);
+      }
+
+      refreshSceneGeometry();
+      selectObstacle(obstacle.id);
+      clearPathState();
+      drawEditorView();
+      return;
+    }
+
+    if (
+      editorState.isOpen &&
+      editorState.armedPointerId === event.pointerId &&
+      !editorState.draggingObstacleId
+    ) {
+      const distance = Math.hypot(
+        event.clientX - editorState.armedStartX,
+        event.clientY - editorState.armedStartY
+      );
+      if (distance > 6) {
+        editorState.draggingObstacleId = editorState.armedObstacleId;
+        editorState.dragPointerId = editorState.armedPointerId;
+        editorState.dragOffsetX = editorState.armedOffsetX;
+        editorState.dragOffsetY = editorState.armedOffsetY;
+      }
+    }
+
+    if (
+      editorState.isOpen &&
+      editorState.draggingObstacleId &&
+      editorState.dragPointerId === event.pointerId
+    ) {
+      const obstacle = getObstacleById(editorState.draggingObstacleId);
+      if (!obstacle) {
+        return;
+      }
+      setPointerFromEvent(event);
+      if (intersectGroundPlaneAtY(obstacle.elevation ?? 0)) {
+        const mapPoint = worldToMapCoords(planeHit.x, planeHit.z);
+        const centerX = clamp(
+          mapPoint.x + editorState.dragOffsetX,
+          obstacle.w / 2,
+          cfg.map.width_m - obstacle.w / 2
+        );
+        const centerY = clamp(
+          mapPoint.y + editorState.dragOffsetY,
+          obstacle.d / 2,
+          cfg.map.height_m - obstacle.d / 2
+        );
+        obstacle.x = centerX - obstacle.w / 2;
+        obstacle.y = centerY - obstacle.d / 2;
+        refreshSceneGeometry();
+        selectObstacle(obstacle.id);
+        clearPathState();
+        drawEditorView();
+      }
+      return;
+    }
+
     if (!orbitState.dragging || orbitState.pointerId !== event.pointerId) {
       return;
     }
@@ -1637,21 +2694,68 @@ async function main() {
     orbitState.lastX = event.clientX;
     orbitState.lastY = event.clientY;
 
+    if ((editorState.isOpen || cameraState.mode === "free") && orbitState.dragMode === "pan") {
+      camera.getWorldDirection(cameraForward);
+      cameraForward.y = 0;
+      if (cameraForward.lengthSq() < 1e-6) {
+        cameraForward.set(0, 0, -1);
+      } else {
+        cameraForward.normalize();
+      }
+      cameraRight.crossVectors(cameraForward, upAxis).normalize();
+      const panScale = Math.max(orbitState.distance * 0.0022, 0.0035);
+      orbitState.target.addScaledVector(cameraRight, -deltaX * panScale);
+      orbitState.target.addScaledVector(cameraForward, deltaY * panScale);
+      clampOrbitTarget();
+      return;
+    }
+
     orbitState.azimuth -= deltaX * 0.01;
     orbitState.polar = clamp(orbitState.polar + deltaY * 0.008, 0.35, 1.35);
   }
 
   function onPointerUp(event) {
+    if (editorState.resizePointerId === event.pointerId) {
+      editorState.resizingHandleAxis = null;
+      editorState.resizePointerId = null;
+      editorState.resizeObstacleId = null;
+      renderer.domElement.releasePointerCapture(event.pointerId);
+      updateEditorStatus("Obstacle size updated.");
+      return;
+    }
+    if (editorState.armedPointerId === event.pointerId) {
+      editorState.armedObstacleId = null;
+      editorState.armedPointerId = null;
+      editorState.armedOffsetX = 0;
+      editorState.armedOffsetY = 0;
+      if (!editorState.dragPointerId) {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+    }
+    if (editorState.dragPointerId === event.pointerId) {
+      editorState.draggingObstacleId = null;
+      editorState.dragPointerId = null;
+      editorState.dragOffsetX = 0;
+      editorState.dragOffsetY = 0;
+      renderer.domElement.releasePointerCapture(event.pointerId);
+      updateEditorStatus("Obstacle moved.");
+      return;
+    }
     if (orbitState.pointerId === event.pointerId) {
       orbitState.dragging = false;
       renderer.domElement.releasePointerCapture(event.pointerId);
       orbitState.pointerId = null;
+      orbitState.dragMode = "orbit";
     }
   }
 
   function onWheel(event) {
     event.preventDefault();
-    orbitState.distance = clamp(orbitState.distance + event.deltaY * 0.0035, 2.1, 6.5);
+    orbitState.distance = clamp(
+      orbitState.distance + event.deltaY * 0.0035,
+      editorState.isOpen || cameraState.mode === "free" ? 3.2 : 2.1,
+      editorState.isOpen || cameraState.mode === "free" ? 22 : 9.5
+    );
   }
 
   renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -1659,6 +2763,22 @@ async function main() {
   renderer.domElement.addEventListener("pointerup", onPointerUp);
   renderer.domElement.addEventListener("pointercancel", onPointerUp);
   renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
+  renderer.domElement.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+  hydrateHudButtons();
+  hydrateGuidePanel();
+  syncCameraModeButton();
+  syncGuideVisibility();
+  if (appMode === "editor") {
+    showEditorScreen(true);
+  }
+  document.getElementById("camera-mode-btn")?.addEventListener("click", () => {
+    setCameraMode(cameraState.mode === "follow" ? "free" : "follow");
+  });
+  document.getElementById("guide-toggle-btn")?.addEventListener("click", () => {
+    toggleGuideVisibility();
+  });
   document.getElementById("set-start-btn").addEventListener("click", () => {
     setStartToRobotPosition();
   });
@@ -1679,6 +2799,99 @@ async function main() {
   });
   document.getElementById("robot-select").addEventListener("change", (event) => {
     switchRobot(event.target.value);
+  });
+  document.getElementById("map-edit-btn").addEventListener("click", () => {
+    saveStoredMapState(cfg, mapState);
+    window.location.href = "./editor.html";
+  });
+  document.getElementById("editor-close-btn").addEventListener("click", () => {
+    saveStoredMapState(cfg, mapState);
+    window.location.href = "./index.html";
+  });
+  document.getElementById("editor-select-btn").addEventListener("click", () => {
+    setEditorMode("select");
+    updateEditorStatus("Click an obstacle to select and drag it.");
+  });
+  document.getElementById("editor-add-btn").addEventListener("click", () => {
+    setEditorMode("add");
+    updateEditorStatus("Click the 3D map to place an obstacle.");
+  });
+  document.getElementById("editor-delete-btn").addEventListener("click", () => {
+    setEditorMode("delete");
+    updateEditorStatus("Click an obstacle in 3D to delete it.");
+  });
+  document.getElementById("editor-spawn-btn").addEventListener("click", () => {
+    setEditorMode("spawn");
+    updateEditorStatus("Click the 3D map to place the spawn point.");
+  });
+  document.getElementById("editor-apply-btn").addEventListener("click", () => {
+    applyMapChangesFromEditor();
+  });
+  document.getElementById("editor-canvas").addEventListener("click", (event) => {
+    const point = editorCanvasToMapPoint(event);
+    if (editorState.mode === "add") {
+      const w = clamp(Number(document.getElementById("editor-obstacle-width").value) || 0.8, 0.2, 6);
+      const d = clamp(Number(document.getElementById("editor-obstacle-depth").value) || 0.8, 0.2, 6);
+      const h = clamp(Number(document.getElementById("editor-obstacle-height").value) || 0.6, 0.1, 2);
+      mapState.obstacles.push({
+        x: clamp(point.x - w / 2, 0, Math.max(0, cfg.map.width_m - w)),
+        y: clamp(point.y - d / 2, 0, Math.max(0, cfg.map.height_m - d)),
+        w,
+        d,
+        h,
+      });
+      drawEditorView();
+      updateEditorStatus("Obstacle added.");
+    } else if (editorState.mode === "delete") {
+      const index = mapState.obstacles.findIndex((obstacle) =>
+        point.x >= obstacle.x &&
+        point.x <= obstacle.x + obstacle.w &&
+        point.y >= obstacle.y &&
+        point.y <= obstacle.y + obstacle.d
+      );
+      if (index >= 0) {
+        mapState.obstacles.splice(index, 1);
+        drawEditorView();
+        updateEditorStatus("Obstacle deleted.");
+      }
+    } else if (editorState.mode === "spawn") {
+      cfg.go2_pose.x_m = Number(point.x.toFixed(2));
+      cfg.go2_pose.y_m = Number(point.y.toFixed(2));
+      drawEditorView();
+      updateEditorStatus("Spawn point moved.");
+    }
+  });
+  [
+    "editor-box-x",
+    "editor-box-y",
+    "editor-box-elevation",
+    "editor-box-height",
+    "editor-box-width",
+    "editor-box-depth",
+  ].forEach((id) => {
+    document.getElementById(id).addEventListener("input", () => {
+      const obstacle = getObstacleById(editorState.selectedObstacleId);
+      if (!obstacle) {
+        return;
+      }
+      const nextX = Number(document.getElementById("editor-box-x").value);
+      const nextY = Number(document.getElementById("editor-box-y").value);
+      const nextElevation = Number(document.getElementById("editor-box-elevation").value);
+      const nextHeight = Number(document.getElementById("editor-box-height").value);
+      const nextWidth = Number(document.getElementById("editor-box-width").value);
+      const nextDepth = Number(document.getElementById("editor-box-depth").value);
+      obstacle.w = clamp(Number.isFinite(nextWidth) ? nextWidth : obstacle.w, 0.2, 6);
+      obstacle.d = clamp(Number.isFinite(nextDepth) ? nextDepth : obstacle.d, 0.2, 6);
+      obstacle.h = clamp(Number.isFinite(nextHeight) ? nextHeight : obstacle.h, 0.1, 4);
+      obstacle.elevation = clamp(Number.isFinite(nextElevation) ? nextElevation : obstacle.elevation ?? 0, 0, 4);
+      obstacle.x = clamp(Number.isFinite(nextX) ? nextX : obstacle.x, 0, Math.max(0, cfg.map.width_m - obstacle.w));
+      obstacle.y = clamp(Number.isFinite(nextY) ? nextY : obstacle.y, 0, Math.max(0, cfg.map.height_m - obstacle.d));
+      refreshSceneGeometry();
+      selectObstacle(obstacle.id);
+      clearPathState();
+      drawEditorView();
+      updateEditorStatus("Selected obstacle updated.");
+    });
   });
 
   function resize() {
@@ -1701,9 +2914,11 @@ async function main() {
     sneak: false,
   });
   robots.go2.groundOffset = calibrateGroundOffset(go2Rig);
-  robots.turtlebot3.groundOffset = calibrateGenericGroundOffset(turtlebot3Rig.root);
+  robots.turtlebot3.groundOffset = turtlebot3Spec.wheelRadius - turtlebotWheelCenterHeight;
   motionState.groundOffset = activeRobot.groundOffset;
   turtlebot3Rig.root.visible = false;
+  plannerState.start = worldToMapPoint(activeRobot.root.position);
+  setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
 
   function animate() {
     const delta = Math.min(clock.getDelta(), 0.05);
@@ -1739,7 +2954,11 @@ async function main() {
           stopAutoNav("Goal reached.");
         } else {
           const targetIndex = Math.min(plannerState.autoSegmentIndex, plannerState.path.length - 1);
-          const previousPoint = plannerState.path[Math.max(0, targetIndex - 1)];
+          const isEntrySegment =
+            plannerState.autoEntryPoint && targetIndex === plannerState.autoEntryTargetIndex;
+          const previousPoint = isEntrySegment
+            ? plannerState.autoEntryPoint
+            : plannerState.path[Math.max(0, targetIndex - 1)];
           const targetPoint = plannerState.path[targetIndex];
           const toTargetX = targetPoint.x - motionState.x;
           const toTargetZ = targetPoint.z - motionState.z;
@@ -1765,7 +2984,7 @@ async function main() {
           lateralInput = 0;
 
           if (plannerState.autoSegmentPhase === "startAlign") {
-            const startPoint = plannerState.path[0];
+            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
             const startYaw = Math.atan2(-(startPoint.z - motionState.z), startPoint.x - motionState.x);
             const yawDelta = shortestAngleDelta(startYaw, motionState.yaw);
             const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
@@ -1779,7 +2998,7 @@ async function main() {
               plannerState.autoSegmentPhase = "startMove";
             }
           } else if (plannerState.autoSegmentPhase === "startMove") {
-            const startPoint = plannerState.path[0];
+            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
             const toStartX = startPoint.x - motionState.x;
             const toStartZ = startPoint.z - motionState.z;
             const startDistance = Math.hypot(toStartX, toStartZ);
@@ -1811,7 +3030,7 @@ async function main() {
             if (startDistance < 0.04 || moveDistance >= startDistance - 1e-6) {
               motionState.x = startPoint.x;
               motionState.z = startPoint.z;
-              plannerState.autoSegmentIndex = Math.min(1, plannerState.path.length - 1);
+              plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
               plannerState.autoSegmentPhase = "align";
               forwardInput = 0;
             }
@@ -1861,6 +3080,9 @@ async function main() {
             if (reachedWaypoint || moveDistance >= waypointDistance - 1e-6) {
               motionState.x = targetPoint.x;
               motionState.z = targetPoint.z;
+              if (isEntrySegment) {
+                plannerState.autoEntryPoint = null;
+              }
               if (isFinalWaypoint) {
                 plannerState.autoSegmentIndex = plannerState.path.length;
                 forwardInput = 0;
@@ -2064,26 +3286,32 @@ async function main() {
       const yawRate = turnInput * turnSpeed;
       const leftWheelLinear = linearVelocity - yawRate * (turtlebot3Spec.wheelSeparation * 0.5);
       const rightWheelLinear = linearVelocity + yawRate * (turtlebot3Spec.wheelSeparation * 0.5);
-      turtlebot3Rig.wheelLeftPivot.rotation.z -= (leftWheelLinear / turtlebot3Spec.wheelRadius) * delta;
-      turtlebot3Rig.wheelRightPivot.rotation.z -= (rightWheelLinear / turtlebot3Spec.wheelRadius) * delta;
+      turtlebot3Rig.wheelLeftSpin.rotation.y -= (leftWheelLinear / turtlebot3Spec.wheelRadius) * delta;
+      turtlebot3Rig.wheelRightSpin.rotation.y -= (rightWheelLinear / turtlebot3Spec.wheelRadius) * delta;
     }
 
     scanRing.scale.setScalar(pulse);
     scanRing.position.set(activeRobot.root.position.x, 0, activeRobot.root.position.z);
 
-    const cameraYaw = motionState.yaw + orbitState.azimuth;
     const horizontalRadius = Math.cos(orbitState.polar) * orbitState.distance;
     const verticalOffset = Math.sin(orbitState.polar) * orbitState.distance;
     chaseOffset.set(-horizontalRadius, verticalOffset, 0);
-    chaseOffset.applyAxisAngle(upAxis, cameraYaw);
-    chasePosition.copy(activeRobot.root.position).add(chaseOffset);
-    camera.position.lerp(chasePosition, 0.12);
-
-    chaseLookAt.set(
-      activeRobot.root.position.x + Math.cos(motionState.yaw) * 0.55,
-      0.42 + motionState.jumpY * 0.25 + crouchOffset * 0.3,
-      activeRobot.root.position.z - Math.sin(motionState.yaw) * 0.55
-    );
+    if (editorState.isOpen || cameraState.mode === "free") {
+      chaseOffset.applyAxisAngle(upAxis, orbitState.azimuth);
+      chasePosition.copy(orbitState.target).add(chaseOffset);
+      camera.position.lerp(chasePosition, 0.18);
+      chaseLookAt.copy(orbitState.target);
+    } else {
+      const cameraYaw = motionState.yaw + orbitState.azimuth;
+      chaseOffset.applyAxisAngle(upAxis, cameraYaw);
+      chasePosition.copy(activeRobot.root.position).add(chaseOffset);
+      camera.position.lerp(chasePosition, 0.12);
+      chaseLookAt.set(
+        activeRobot.root.position.x + Math.cos(motionState.yaw) * 0.55,
+        0.42 + motionState.jumpY * 0.25 + crouchOffset * 0.3,
+        activeRobot.root.position.z - Math.sin(motionState.yaw) * 0.55
+      );
+    }
     camera.lookAt(chaseLookAt);
 
     syncPoseToHud();
