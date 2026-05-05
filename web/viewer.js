@@ -1,23 +1,26 @@
 import * as THREE from "three";
 import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import {
+  plannerModules,
+  inflateBounds,
+  pointInRect,
+  projectPointOntoPath,
+  samplePathAtProgress,
+} from "./modules/path-planners.js";
+import { followerModules } from "./modules/path-followers.js";
+import {
+  applyStoredMapState,
+  createRuntimeMapState,
+  loadStoredMapState,
+  saveStoredMapState,
+} from "./modules/map-state.js";
+import { drawPlannerDebugView, showPlannerDebugPanel } from "./modules/planner-debug-view.js";
 
 const defaultConfig = {
   map: { width_m: 10.0, height_m: 8.0 },
   go2_pose: { x_m: 3.5, y_m: 2.0, yaw_deg: 45.0 },
 };
-const mapStorageKey = "robot-nav-viewer.map-state.v1";
-
-const initialObstacles = [
-  { x: 2.0, y: 1.0, w: 3.0, d: 0.3, h: 0.45 },
-  { x: 6.0, y: 3.0, w: 0.4, d: 2.5, h: 0.8 },
-  { x: 1.0, y: 5.5, w: 2.8, d: 0.4, h: 0.55 },
-  { x: 7.4, y: 0.8, w: 0.55, d: 0.6, h: 0.12 },
-  { x: 7.95, y: 0.8, w: 0.55, d: 0.6, h: 0.24 },
-  { x: 8.5, y: 0.8, w: 0.55, d: 0.6, h: 0.36 },
-  { x: 9.05, y: 0.8, w: 0.55, d: 0.6, h: 0.48 },
-];
-
 const urdfBasis = new THREE.Matrix4().set(
   1, 0, 0, 0,
   0, 0, 1, 0,
@@ -103,58 +106,6 @@ const turtlebot3Spec = {
   wheelSeparation: 0.16,
 };
 
-function hydrateObstacleList(obstacles, nextIdStart = 1) {
-  let nextId = nextIdStart;
-  const usedIds = new Set();
-  const hydrated = obstacles.map((obstacle) => {
-    let assignedId = Number(obstacle.id);
-    if (!Number.isInteger(assignedId) || usedIds.has(assignedId) || assignedId < 1) {
-      while (usedIds.has(nextId)) {
-        nextId += 1;
-      }
-      assignedId = nextId++;
-    }
-    usedIds.add(assignedId);
-    nextId = Math.max(nextId, assignedId + 1);
-    return {
-      ...obstacle,
-      id: assignedId,
-      elevation: obstacle.elevation ?? 0,
-    };
-  });
-  return {
-    nextId,
-    obstacles: hydrated,
-  };
-}
-
-function loadStoredMapState() {
-  try {
-    const raw = window.localStorage.getItem(mapStorageKey);
-    if (!raw) {
-      return null;
-    }
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function saveStoredMapState(cfg, mapState) {
-  try {
-    window.localStorage.setItem(
-      mapStorageKey,
-      JSON.stringify({
-        map: cfg.map,
-        go2_pose: cfg.go2_pose,
-        obstacles: mapState.obstacles,
-      })
-    );
-  } catch {
-    // Ignore localStorage errors and keep runtime state alive.
-  }
-}
-
 async function loadConfig() {
   try {
     const res = await fetch("../config/go2_map.json");
@@ -169,17 +120,6 @@ async function loadConfig() {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
-}
-
-function moveTowards(current, target, maxDelta) {
-  if (Math.abs(target - current) <= maxDelta) {
-    return target;
-  }
-  return current + Math.sign(target - current) * maxDelta;
-}
-
-function shortestAngleDelta(target, current) {
-  return THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI;
 }
 
 function mapToWorld(x, y, widthM, heightM) {
@@ -956,207 +896,6 @@ function resolveMotionWithSteps(nextX, nextZ, currentX, currentZ, currentSupport
   };
 }
 
-function inflateBounds(bounds, margin) {
-  return bounds.map((box) => ({
-    minX: box.minX - margin,
-    maxX: box.maxX + margin,
-    minZ: box.minZ - margin,
-    maxZ: box.maxZ + margin,
-  }));
-}
-
-function pointInRect(point, rect) {
-  return (
-    point.x > rect.minX &&
-    point.x < rect.maxX &&
-    point.z > rect.minZ &&
-    point.z < rect.maxZ
-  );
-}
-
-function orientation(a, b, c) {
-  return (b.z - a.z) * (c.x - b.x) - (b.x - a.x) * (c.z - b.z);
-}
-
-function onSegment(a, b, c) {
-  return (
-    Math.min(a.x, c.x) <= b.x + 1e-6 &&
-    b.x <= Math.max(a.x, c.x) + 1e-6 &&
-    Math.min(a.z, c.z) <= b.z + 1e-6 &&
-    b.z <= Math.max(a.z, c.z) + 1e-6
-  );
-}
-
-function segmentsIntersect(p1, q1, p2, q2) {
-  const o1 = orientation(p1, q1, p2);
-  const o2 = orientation(p1, q1, q2);
-  const o3 = orientation(p2, q2, p1);
-  const o4 = orientation(p2, q2, q1);
-
-  if ((o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0)) {
-    return true;
-  }
-
-  if (Math.abs(o1) < 1e-6 && onSegment(p1, p2, q1)) return true;
-  if (Math.abs(o2) < 1e-6 && onSegment(p1, q2, q1)) return true;
-  if (Math.abs(o3) < 1e-6 && onSegment(p2, p1, q2)) return true;
-  if (Math.abs(o4) < 1e-6 && onSegment(p2, q1, q2)) return true;
-
-  return false;
-}
-
-function segmentCrossesRect(a, b, rect) {
-  if (pointInRect(a, rect) || pointInRect(b, rect)) {
-    return true;
-  }
-
-  const corners = [
-    { x: rect.minX, z: rect.minZ },
-    { x: rect.maxX, z: rect.minZ },
-    { x: rect.maxX, z: rect.maxZ },
-    { x: rect.minX, z: rect.maxZ },
-  ];
-
-  for (let index = 0; index < corners.length; index += 1) {
-    const c1 = corners[index];
-    const c2 = corners[(index + 1) % corners.length];
-    if (segmentsIntersect(a, b, c1, c2)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasLineOfSight(a, b, inflatedBounds) {
-  for (const rect of inflatedBounds) {
-    if (segmentCrossesRect(a, b, rect)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function makeNodeKey(point) {
-  return `${point.x.toFixed(4)}:${point.z.toFixed(4)}`;
-}
-
-function buildVisibilityGraph(start, goal, inflatedBounds, mapWidth, mapHeight) {
-  const margin = 0.04;
-  const nodes = [start, goal];
-
-  for (const rect of inflatedBounds) {
-    const corners = [
-      { x: rect.minX - margin, z: rect.minZ - margin },
-      { x: rect.maxX + margin, z: rect.minZ - margin },
-      { x: rect.maxX + margin, z: rect.maxZ + margin },
-      { x: rect.minX - margin, z: rect.maxZ + margin },
-    ];
-
-    for (const corner of corners) {
-      if (
-        corner.x <= -mapWidth / 2 + margin ||
-        corner.x >= mapWidth / 2 - margin ||
-        corner.z <= -mapHeight / 2 + margin ||
-        corner.z >= mapHeight / 2 - margin
-      ) {
-        continue;
-      }
-      if (!inflatedBounds.some((rectTest) => pointInRect(corner, rectTest))) {
-        nodes.push(corner);
-      }
-    }
-  }
-
-  const deduped = [];
-  const seen = new Set();
-  for (const node of nodes) {
-    const key = makeNodeKey(node);
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(node);
-    }
-  }
-
-  const graph = deduped.map(() => []);
-  for (let i = 0; i < deduped.length; i += 1) {
-    for (let j = i + 1; j < deduped.length; j += 1) {
-      if (!hasLineOfSight(deduped[i], deduped[j], inflatedBounds)) {
-        continue;
-      }
-      const dx = deduped[i].x - deduped[j].x;
-      const dz = deduped[i].z - deduped[j].z;
-      const distance = Math.hypot(dx, dz);
-      graph[i].push({ to: j, cost: distance });
-      graph[j].push({ to: i, cost: distance });
-    }
-  }
-
-  return { nodes: deduped, graph };
-}
-
-function dijkstraShortestPath(nodes, graph, startIndex, goalIndex) {
-  const dist = nodes.map(() => Number.POSITIVE_INFINITY);
-  const prev = nodes.map(() => -1);
-  const visited = nodes.map(() => false);
-  dist[startIndex] = 0;
-
-  for (let count = 0; count < nodes.length; count += 1) {
-    let current = -1;
-    let best = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < nodes.length; i += 1) {
-      if (!visited[i] && dist[i] < best) {
-        best = dist[i];
-        current = i;
-      }
-    }
-
-    if (current === -1 || current === goalIndex) {
-      break;
-    }
-
-    visited[current] = true;
-    for (const edge of graph[current]) {
-      const alt = dist[current] + edge.cost;
-      if (alt < dist[edge.to]) {
-        dist[edge.to] = alt;
-        prev[edge.to] = current;
-      }
-    }
-  }
-
-  if (!Number.isFinite(dist[goalIndex])) {
-    return null;
-  }
-
-  const path = [];
-  for (let cursor = goalIndex; cursor !== -1; cursor = prev[cursor]) {
-    path.push(nodes[cursor]);
-  }
-  path.reverse();
-  return path;
-}
-
-function prunePath(path, inflatedBounds) {
-  if (!path || path.length <= 2) {
-    return path;
-  }
-
-  const pruned = [path[0]];
-  let anchor = 0;
-
-  while (anchor < path.length - 1) {
-    let next = path.length - 1;
-    while (next > anchor + 1 && !hasLineOfSight(path[anchor], path[next], inflatedBounds)) {
-      next -= 1;
-    }
-    pruned.push(path[next]);
-    anchor = next;
-  }
-
-  return pruned;
-}
-
 function createMarker(color, radius, height) {
   const mesh = new THREE.Mesh(
     new THREE.CylinderGeometry(radius, radius, height, 24),
@@ -1215,266 +954,11 @@ function buildPathRenderables(path, robotType) {
   return group;
 }
 
-function buildSmoothPath(path) {
-  if (!path || path.length < 2) {
-    return path;
-  }
-
-  if (path.length < 3) {
-    return path.map((point) => ({ x: point.x, z: point.z }));
-  }
-
-  const curve = new THREE.CatmullRomCurve3(
-    path.map((point) => pointToVector(point, 0)),
-    false,
-    "centripetal",
-    0.15
-  );
-
-  return curve.getPoints(Math.max(32, path.length * 18)).map((point) => ({
-    x: point.x,
-    z: point.z,
-  }));
-}
-
-function computePathMetrics(path) {
-  const cumulative = [0];
-  for (let index = 1; index < path.length; index += 1) {
-    const prev = path[index - 1];
-    const current = path[index];
-    cumulative.push(cumulative[index - 1] + Math.hypot(current.x - prev.x, current.z - prev.z));
-  }
-  return {
-    cumulative,
-    totalLength: cumulative[cumulative.length - 1] ?? 0,
-  };
-}
-
-function closestPointOnSegment(point, a, b) {
-  const abX = b.x - a.x;
-  const abZ = b.z - a.z;
-  const abLenSq = abX * abX + abZ * abZ;
-  if (abLenSq < 1e-8) {
-    return { point: a, t: 0, distance: Math.hypot(point.x - a.x, point.z - a.z) };
-  }
-
-  const apX = point.x - a.x;
-  const apZ = point.z - a.z;
-  const t = clamp((apX * abX + apZ * abZ) / abLenSq, 0, 1);
-  const proj = { x: a.x + abX * t, z: a.z + abZ * t };
-  return { point: proj, t, distance: Math.hypot(point.x - proj.x, point.z - proj.z) };
-}
-
-function projectPointOntoPath(point, path, metrics) {
-  let best = {
-    progress: 0,
-    point: path[0],
-    distance: Number.POSITIVE_INFINITY,
-    segmentIndex: 0,
-  };
-
-  for (let index = 0; index < path.length - 1; index += 1) {
-    const result = closestPointOnSegment(point, path[index], path[index + 1]);
-    if (result.distance < best.distance) {
-      const segmentLength = metrics.cumulative[index + 1] - metrics.cumulative[index];
-      best = {
-        progress: metrics.cumulative[index] + segmentLength * result.t,
-        point: result.point,
-        distance: result.distance,
-        segmentIndex: index,
-      };
-    }
-  }
-
-  return best;
-}
-
-function samplePathAtProgress(path, metrics, progress) {
-  if (progress <= 0) {
-    return path[0];
-  }
-  if (progress >= metrics.totalLength) {
-    return path[path.length - 1];
-  }
-
-  for (let index = 0; index < metrics.cumulative.length - 1; index += 1) {
-    const startProgress = metrics.cumulative[index];
-    const endProgress = metrics.cumulative[index + 1];
-    if (progress <= endProgress) {
-      const span = endProgress - startProgress;
-      const t = span > 1e-8 ? (progress - startProgress) / span : 0;
-      return {
-        x: THREE.MathUtils.lerp(path[index].x, path[index + 1].x, t),
-        z: THREE.MathUtils.lerp(path[index].z, path[index + 1].z, t),
-      };
-    }
-  }
-
-  return path[path.length - 1];
-}
-
-function showPlannerDebugPanel(visible) {
-  const panel = document.getElementById("planner-debug");
-  if (!panel) {
-    return;
-  }
-  panel.classList.toggle("is-visible", visible);
-  panel.setAttribute("aria-hidden", visible ? "false" : "true");
-}
-
-function drawPlannerDebugView(debugData, cfg, robotLabel) {
-  const canvas = document.getElementById("planner-debug-canvas");
-  if (!canvas || !debugData) {
-    return;
-  }
-
-  const ctx = canvas.getContext("2d");
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#07101a";
-  ctx.fillRect(0, 0, width, height);
-
-  const pad = 14;
-  const scale = Math.min(
-    (width - pad * 2) / cfg.map.width_m,
-    (height - pad * 2) / cfg.map.height_m
-  );
-  const mapLeft = pad;
-  const mapTop = pad;
-
-  function toCanvas(point) {
-    return {
-      x: mapLeft + (cfg.map.width_m / 2 - point.x) * scale,
-      y: mapTop + (cfg.map.height_m / 2 - point.z) * scale,
-    };
-  }
-
-  ctx.strokeStyle = "rgba(126, 208, 255, 0.18)";
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= cfg.map.width_m; x += 1) {
-    const canvasX = mapLeft + x * scale;
-    ctx.beginPath();
-    ctx.moveTo(canvasX, mapTop);
-    ctx.lineTo(canvasX, mapTop + cfg.map.height_m * scale);
-    ctx.stroke();
-  }
-  for (let z = 0; z <= cfg.map.height_m; z += 1) {
-    const canvasY = mapTop + z * scale;
-    ctx.beginPath();
-    ctx.moveTo(mapLeft, canvasY);
-    ctx.lineTo(mapLeft + cfg.map.width_m * scale, canvasY);
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = "rgba(255, 122, 26, 0.18)";
-  for (const rect of debugData.inflatedBounds) {
-    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
-    const rectWidth = (rect.maxX - rect.minX) * scale;
-    const rectHeight = (rect.maxZ - rect.minZ) * scale;
-    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
-  }
-
-  ctx.fillStyle = "rgba(159, 215, 255, 0.35)";
-  for (const rect of debugData.obstacleBounds) {
-    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
-    const rectWidth = (rect.maxX - rect.minX) * scale;
-    const rectHeight = (rect.maxZ - rect.minZ) * scale;
-    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
-  }
-
-  ctx.strokeStyle = "rgba(141, 152, 170, 0.26)";
-  ctx.lineWidth = 1;
-  for (let index = 0; index < debugData.graph.length; index += 1) {
-    const from = toCanvas(debugData.nodes[index]);
-    for (const edge of debugData.graph[index]) {
-      if (edge.to <= index) {
-        continue;
-      }
-      const to = toCanvas(debugData.nodes[edge.to]);
-      ctx.beginPath();
-      ctx.moveTo(from.x, from.y);
-      ctx.lineTo(to.x, to.y);
-      ctx.stroke();
-    }
-  }
-
-  if (debugData.rawPath && debugData.rawPath.length >= 2) {
-    ctx.strokeStyle = "rgba(255, 122, 26, 0.68)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    debugData.rawPath.forEach((point, index) => {
-      const p = toCanvas(point);
-      if (index === 0) {
-        ctx.moveTo(p.x, p.y);
-      } else {
-        ctx.lineTo(p.x, p.y);
-      }
-    });
-    ctx.stroke();
-  }
-
-  if (debugData.path && debugData.path.length >= 2) {
-    ctx.strokeStyle = robotLabel.includes("TurtleBot3") ? "#ffb176" : "#1d8f4d";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    debugData.path.forEach((point, index) => {
-      const p = toCanvas(point);
-      if (index === 0) {
-        ctx.moveTo(p.x, p.y);
-      } else {
-        ctx.lineTo(p.x, p.y);
-      }
-    });
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = "#4de18b";
-  const start = toCanvas(debugData.start);
-  ctx.beginPath();
-  ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#ff7a7a";
-  const goal = toCanvas(debugData.goal);
-  ctx.beginPath();
-  ctx.arc(goal.x, goal.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#d8e0eb";
-  for (const node of debugData.nodes) {
-    const p = toCanvas(node);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  const edgeCount = debugData.graph.reduce((sum, edges) => sum + edges.length, 0) / 2;
-  document.querySelector('[data-role="debug-robot"]').textContent = robotLabel;
-  document.querySelector('[data-role="debug-nodes"]').textContent = String(debugData.nodes.length);
-  document.querySelector('[data-role="debug-edges"]').textContent = String(edgeCount);
-  document.querySelector('[data-role="debug-raw"]').textContent = String(debugData.rawPath?.length ?? 0);
-  document.querySelector('[data-role="debug-final"]').textContent = String(debugData.path?.length ?? 0);
-  showPlannerDebugPanel(true);
-}
-
-async function main() {
+async function main(appModeOverride) {
   const cfg = await loadConfig();
-  const appMode = document.body.dataset.appMode ?? "viewer";
+  const appMode = appModeOverride ?? document.body.dataset.appMode ?? "viewer";
   const storedMapState = loadStoredMapState();
-  if (storedMapState?.map) {
-    cfg.map = {
-      width_m: Number(storedMapState.map.width_m ?? cfg.map.width_m),
-      height_m: Number(storedMapState.map.height_m ?? cfg.map.height_m),
-    };
-  }
-  if (storedMapState?.go2_pose) {
-    cfg.go2_pose = {
-      x_m: Number(storedMapState.go2_pose.x_m ?? cfg.go2_pose.x_m),
-      y_m: Number(storedMapState.go2_pose.y_m ?? cfg.go2_pose.y_m),
-      yaw_deg: Number(storedMapState.go2_pose.yaw_deg ?? cfg.go2_pose.yaw_deg),
-    };
-  }
+  applyStoredMapState(cfg, storedMapState);
   updateLoadingState("Loading official Go2 assets...");
 
   let go2Assets = null;
@@ -1493,11 +977,7 @@ async function main() {
     180
   );
 
-  const hydratedObstacles = hydrateObstacleList(storedMapState?.obstacles ?? initialObstacles);
-  const mapState = {
-    nextObstacleId: hydratedObstacles.nextId,
-    obstacles: hydratedObstacles.obstacles,
-  };
+  const mapState = createRuntimeMapState(storedMapState);
   saveStoredMapState(cfg, mapState);
   const sceneRefs = createScene(cfg, mapState.obstacles);
   const { scene, scanRing } = sceneRefs;
@@ -1604,6 +1084,7 @@ async function main() {
     speed: 0,
   };
   const plannerState = {
+    plannerKey: "visibilityGraph",
     mode: null,
     start: null,
     goal: null,
@@ -1613,11 +1094,8 @@ async function main() {
     smoothPathMetrics: null,
     debugData: null,
     autoActive: false,
-    pathProgress: 0,
-    autoSegmentIndex: 1,
-    autoSegmentPhase: "align",
-    autoEntryPoint: null,
-    autoEntryTargetIndex: 1,
+    followerKey: null,
+    followerState: null,
   };
   const editorState = {
     isOpen: false,
@@ -1739,9 +1217,8 @@ async function main() {
     plannerState.smoothPath = null;
     plannerState.smoothPathMetrics = null;
     plannerState.debugData = null;
-    plannerState.autoSegmentPhase = "align";
-    plannerState.autoEntryPoint = null;
-    plannerState.autoEntryTargetIndex = 1;
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     clearRouteRender();
     showPlannerDebugPanel(false);
     stopAutoNav();
@@ -2228,65 +1705,51 @@ async function main() {
       return;
     }
 
-    const inflatedBounds = inflateBounds(obstacleBounds, robotCollisionRadius + 0.03);
-    if (
-      inflatedBounds.some((rect) => pointInRect(plannerState.start, rect)) ||
-      inflatedBounds.some((rect) => pointInRect(plannerState.goal, rect))
-    ) {
-      updatePlannerStatus("Start or goal is inside an obstacle margin.");
-      return;
-    }
+    const plannerModule = plannerModules[plannerState.plannerKey];
+    const planResult = plannerModule.plan({
+      start: plannerState.start,
+      goal: plannerState.goal,
+      obstacleBounds,
+      mapWidth: cfg.map.width_m,
+      mapHeight: cfg.map.height_m,
+      clearance: robotCollisionRadius + 0.03,
+    });
 
-    const { nodes, graph } = buildVisibilityGraph(
-      plannerState.start,
-      plannerState.goal,
-      inflatedBounds,
-      cfg.map.width_m,
-      cfg.map.height_m
-    );
-    const rawPath = dijkstraShortestPath(nodes, graph, 0, 1);
-    if (!rawPath) {
+    if (!planResult.ok) {
       plannerState.path = null;
       plannerState.polylineMetrics = null;
       plannerState.smoothPath = null;
       plannerState.smoothPathMetrics = null;
-      plannerState.debugData = null;
+      plannerState.debugData = planResult.debugData ?? null;
       plannerState.autoActive = false;
-      plannerState.autoSegmentPhase = "align";
+      plannerState.followerKey = null;
+      plannerState.followerState = null;
       clearRouteRender();
-      showPlannerDebugPanel(false);
-      updatePlannerStatus("No collision-free path found.");
+      if (planResult.debugData) {
+        drawPlannerDebugView(planResult.debugData, cfg, activeRobot.label);
+      } else {
+        showPlannerDebugPanel(false);
+      }
+      updatePlannerStatus(
+        planResult.reason === "blocked-endpoint"
+          ? "Start or goal is inside an obstacle margin."
+          : "No collision-free path found."
+      );
       return;
     }
 
-    plannerState.path = prunePath(rawPath, inflatedBounds);
-    plannerState.polylineMetrics = computePathMetrics(plannerState.path);
-    plannerState.smoothPath = buildSmoothPath(plannerState.path);
-    plannerState.smoothPathMetrics = computePathMetrics(plannerState.smoothPath);
-    plannerState.debugData = {
-      start: plannerState.start,
-      goal: plannerState.goal,
-      nodes,
-      graph,
-      rawPath,
-      path: plannerState.path,
-      obstacleBounds,
-      inflatedBounds,
-    };
+    plannerState.path = planResult.path;
+    plannerState.polylineMetrics = planResult.polylineMetrics;
+    plannerState.smoothPath = planResult.smoothPath;
+    plannerState.smoothPathMetrics = planResult.smoothPathMetrics;
+    plannerState.debugData = planResult.debugData;
     plannerState.autoActive = false;
-    plannerState.autoSegmentIndex = 1;
-    plannerState.autoSegmentPhase = "align";
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     clearRouteRender();
     routeGroup.add(buildPathRenderables(plannerState.path, activeRobot.type));
     drawPlannerDebugView(plannerState.debugData, cfg, activeRobot.label);
-
-    const totalLength = plannerState.path.reduce((sum, point, index) => {
-      if (index === 0) {
-        return sum;
-      }
-      return sum + Math.hypot(point.x - plannerState.path[index - 1].x, point.z - plannerState.path[index - 1].z);
-    }, 0);
-    updatePlannerStatus(`Path planned. ${plannerState.path.length} nodes / ${totalLength.toFixed(2)}m`);
+    updatePlannerStatus(`Path planned. ${plannerState.path.length} nodes / ${planResult.totalLength.toFixed(2)}m`);
   }
 
   function beginAutoNav() {
@@ -2301,41 +1764,21 @@ async function main() {
     autoCommandState.turn = 0;
     autoCommandState.speed = 0;
     showPlannerDebugPanel(false);
-    const currentPoint = { x: motionState.x, z: motionState.z };
-    if (activeRobot.type === "go2") {
-      const projection = projectPointOntoPath(
-        currentPoint,
-        plannerState.path,
-        plannerState.polylineMetrics
-      );
-      plannerState.pathProgress = projection.progress;
-      plannerState.autoEntryPoint = { x: projection.point.x, z: projection.point.z };
-      plannerState.autoEntryTargetIndex = clamp(
-        projection.segmentIndex + 1,
-        1,
-        plannerState.path.length - 1
-      );
-      plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
-      const entryDistance = Math.hypot(
-        projection.point.x - motionState.x,
-        projection.point.z - motionState.z
-      );
-      plannerState.autoSegmentPhase = entryDistance > 0.08 ? "startAlign" : "align";
-    } else {
-      if (!plannerState.smoothPath || !plannerState.smoothPathMetrics) {
-        updatePlannerStatus("Plan a smooth path before starting auto nav.");
-        plannerState.autoActive = false;
-        return;
-      }
-      const projection = projectPointOntoPath(
-        currentPoint,
-        plannerState.smoothPath,
-        plannerState.smoothPathMetrics
-      );
-      plannerState.pathProgress = projection.progress;
-      plannerState.autoSegmentIndex = 1;
-      plannerState.autoSegmentPhase = "align";
+    const followerKey = activeRobot.type === "go2" ? "go2Polyline" : "turtlebotSmooth";
+    const followerModule = followerModules[followerKey];
+
+    if (followerKey === "turtlebotSmooth" && (!plannerState.smoothPath || !plannerState.smoothPathMetrics)) {
+      updatePlannerStatus("Plan a smooth path before starting auto nav.");
+      plannerState.autoActive = false;
+      return;
     }
+
+    plannerState.followerKey = followerKey;
+    plannerState.followerState = followerModule.begin({
+      plannerState,
+      motionState,
+      projectPointOntoPath,
+    });
     updatePlannerStatus("Auto navigation running.");
     document.getElementById("auto-nav-btn").textContent = "Stop Auto";
     document.getElementById("auto-nav-btn").classList.add("is-active");
@@ -2343,11 +1786,8 @@ async function main() {
 
   function stopAutoNav(statusText) {
     plannerState.autoActive = false;
-    plannerState.pathProgress = 0;
-    plannerState.autoSegmentIndex = 1;
-    plannerState.autoSegmentPhase = "align";
-    plannerState.autoEntryPoint = null;
-    plannerState.autoEntryTargetIndex = 1;
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     autoCommandState.forward = 0;
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
@@ -2942,237 +2382,42 @@ async function main() {
     }
 
     if (plannerState.autoActive) {
-      const currentPoint = { x: motionState.x, z: motionState.z };
+      const followerModule = plannerState.followerKey ? followerModules[plannerState.followerKey] : null;
+      if (followerModule && plannerState.followerState) {
+        const followerResult = followerModule.step({
+          plannerState,
+          motionState,
+          activeRobot,
+          obstacleBounds,
+          delta,
+          turnSpeed,
+          autoNavSpeed,
+          sprintSpeed,
+          halfWidth,
+          halfHeight,
+          autoCommandState,
+          resolveMotionWithSteps,
+          projectPointOntoPath,
+          samplePathAtProgress,
+        });
 
-      if (activeRobot.type === "go2" && plannerState.path && plannerState.polylineMetrics) {
-        const goalPoint = plannerState.path[plannerState.path.length - 1];
-        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
-
-        if (plannerState.autoSegmentIndex >= plannerState.path.length && goalDistance < 0.12) {
+        if (followerResult?.done) {
           plannerState.start = worldToMapPoint(activeRobot.root.position);
           setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
-          stopAutoNav("Goal reached.");
-        } else {
-          const targetIndex = Math.min(plannerState.autoSegmentIndex, plannerState.path.length - 1);
-          const isEntrySegment =
-            plannerState.autoEntryPoint && targetIndex === plannerState.autoEntryTargetIndex;
-          const previousPoint = isEntrySegment
-            ? plannerState.autoEntryPoint
-            : plannerState.path[Math.max(0, targetIndex - 1)];
-          const targetPoint = plannerState.path[targetIndex];
-          const toTargetX = targetPoint.x - motionState.x;
-          const toTargetZ = targetPoint.z - motionState.z;
-          const waypointDistance = Math.hypot(toTargetX, toTargetZ);
-          const isFinalWaypoint = targetIndex === plannerState.path.length - 1;
-          const segmentYaw = Math.atan2(
-            -(targetPoint.z - previousPoint.z),
-            targetPoint.x - previousPoint.x
-          );
-          const nextSegmentYaw = !isFinalWaypoint
-            ? Math.atan2(
-                -(plannerState.path[targetIndex + 1].z - targetPoint.z),
-                plannerState.path[targetIndex + 1].x - targetPoint.x
-              )
-            : segmentYaw;
-          const alignThreshold = 0.035;
-          const turnThreshold = 0.04;
-          const reachedWaypoint = waypointDistance < 0.04;
-
-          directAutoMotion = true;
-          turnInput = 0;
-          forwardInput = 0;
-          lateralInput = 0;
-
-          if (plannerState.autoSegmentPhase === "startAlign") {
-            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
-            const startYaw = Math.atan2(-(startPoint.z - motionState.z), startPoint.x - motionState.x);
-            const yawDelta = shortestAngleDelta(startYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
-            directAutoSpeed = 0.42;
-
-            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = startYaw;
-              plannerState.autoSegmentPhase = "startMove";
-            }
-          } else if (plannerState.autoSegmentPhase === "startMove") {
-            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
-            const toStartX = startPoint.x - motionState.x;
-            const toStartZ = startPoint.z - motionState.z;
-            const startDistance = Math.hypot(toStartX, toStartZ);
-            const moveSpeed = autoNavSpeed * clamp(startDistance / 0.45, 0.22, 0.72);
-            const moveDistance = Math.min(moveSpeed * delta, startDistance);
-            const dirX = toStartX / Math.max(startDistance, 1e-6);
-            const dirZ = toStartZ / Math.max(startDistance, 1e-6);
-            const targetX = clamp(motionState.x + dirX * moveDistance, -halfWidth, halfWidth);
-            const targetZ = clamp(motionState.z + dirZ * moveDistance, -halfHeight, halfHeight);
-            const resolved = resolveMotionWithSteps(
-              targetX,
-              targetZ,
-              motionState.x,
-              motionState.z,
-              motionState.supportY,
-              activeRobot.collisionRadius,
-              activeRobot.stepHeight,
-              obstacleBounds
-            );
-            motionState.x = resolved.x;
-            motionState.z = resolved.z;
-            if (motionState.isGrounded) {
-              motionState.supportY = resolved.supportY;
-            }
-            forwardInput = 0.36;
-            poseForwardInput = 0.78;
-            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.52, 0.72);
-
-            if (startDistance < 0.04 || moveDistance >= startDistance - 1e-6) {
-              motionState.x = startPoint.x;
-              motionState.z = startPoint.z;
-              plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
-              plannerState.autoSegmentPhase = "align";
-              forwardInput = 0;
-            }
-          } else if (plannerState.autoSegmentPhase === "align") {
-            const yawDelta = shortestAngleDelta(segmentYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
-            directAutoSpeed = 0.42;
-
-            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = segmentYaw;
-              plannerState.autoSegmentPhase = "move";
-            }
-          } else if (plannerState.autoSegmentPhase === "move") {
-            const segmentDx = targetPoint.x - previousPoint.x;
-            const segmentDz = targetPoint.z - previousPoint.z;
-            const segmentLength = Math.hypot(segmentDx, segmentDz);
-            autoMoveDirection = {
-              x: segmentDx / Math.max(segmentLength, 1e-6),
-              z: segmentDz / Math.max(segmentLength, 1e-6),
-            };
-            const moveSpeed = autoNavSpeed * clamp(waypointDistance / 0.45, 0.22, 0.72);
-            const moveDistance = Math.min(moveSpeed * delta, waypointDistance);
-            const targetX = clamp(motionState.x + autoMoveDirection.x * moveDistance, -halfWidth, halfWidth);
-            const targetZ = clamp(motionState.z + autoMoveDirection.z * moveDistance, -halfHeight, halfHeight);
-            const resolved = resolveMotionWithSteps(
-              targetX,
-              targetZ,
-              motionState.x,
-              motionState.z,
-              motionState.supportY,
-              activeRobot.collisionRadius,
-              activeRobot.stepHeight,
-              obstacleBounds
-            );
-            motionState.x = resolved.x;
-            motionState.z = resolved.z;
-            if (motionState.isGrounded) {
-              motionState.supportY = resolved.supportY;
-            }
-            forwardInput = 0.36;
-            poseForwardInput = 0.82;
-            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.56, 0.76);
-
-            if (reachedWaypoint || moveDistance >= waypointDistance - 1e-6) {
-              motionState.x = targetPoint.x;
-              motionState.z = targetPoint.z;
-              if (isEntrySegment) {
-                plannerState.autoEntryPoint = null;
-              }
-              if (isFinalWaypoint) {
-                plannerState.autoSegmentIndex = plannerState.path.length;
-                forwardInput = 0;
-                autoMoveDirection = null;
-              } else {
-                plannerState.autoSegmentPhase = "turn";
-                forwardInput = 0;
-                autoMoveDirection = null;
-              }
-            }
-          } else if (plannerState.autoSegmentPhase === "turn") {
-            const yawDelta = shortestAngleDelta(nextSegmentYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.88;
-            directAutoSpeed = 0.48;
-
-            if (Math.abs(yawDelta) < turnThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = nextSegmentYaw;
-              plannerState.autoSegmentIndex += 1;
-              plannerState.autoSegmentPhase = "move";
-            }
+          stopAutoNav(followerResult.statusText ?? "Goal reached.");
+        } else if (followerResult?.command) {
+          directAutoMotion = followerResult.command.directAutoMotion ?? false;
+          directAutoSpeed = followerResult.command.directAutoSpeed ?? directAutoSpeed;
+          forwardInput = followerResult.command.forwardInput ?? forwardInput;
+          lateralInput = followerResult.command.lateralInput ?? lateralInput;
+          turnInput = followerResult.command.turnInput ?? turnInput;
+          poseForwardInput = followerResult.command.poseForwardInput ?? forwardInput;
+          poseLateralInput = followerResult.command.poseLateralInput ?? lateralInput;
+          poseTurnInput = followerResult.command.poseTurnInput ?? turnInput;
+          autoMoveDirection = followerResult.command.autoMoveDirection ?? autoMoveDirection;
+          if (typeof followerResult.command.currentMoveSpeed === "number") {
+            currentMoveSpeed = followerResult.command.currentMoveSpeed;
           }
-        }
-      } else if (
-        activeRobot.type === "turtlebot3" &&
-        plannerState.smoothPath &&
-        plannerState.smoothPathMetrics
-      ) {
-        const projection = projectPointOntoPath(
-          currentPoint,
-          plannerState.smoothPath,
-          plannerState.smoothPathMetrics
-        );
-        plannerState.pathProgress = Math.max(plannerState.pathProgress, projection.progress);
-
-        const remaining = plannerState.smoothPathMetrics.totalLength - plannerState.pathProgress;
-        const goalPoint = plannerState.smoothPath[plannerState.smoothPath.length - 1];
-        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
-
-        if (remaining < 0.08 && goalDistance < 0.12) {
-          plannerState.start = worldToMapPoint(activeRobot.root.position);
-          setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
-          stopAutoNav("Goal reached.");
-        } else {
-          const lookAhead = clamp(0.34 + projection.distance * 1.15, 0.28, 0.7);
-          const targetProgress = clamp(
-            plannerState.pathProgress + lookAhead,
-            0,
-            plannerState.smoothPathMetrics.totalLength
-          );
-          const targetPoint = samplePathAtProgress(
-            plannerState.smoothPath,
-            plannerState.smoothPathMetrics,
-            targetProgress
-          );
-          const toTargetX = targetPoint.x - motionState.x;
-          const toTargetZ = targetPoint.z - motionState.z;
-          const targetYaw = Math.atan2(-toTargetZ, toTargetX);
-          const yawDelta = shortestAngleDelta(targetYaw, motionState.yaw);
-
-          const desiredTurn = clamp(yawDelta * 1.5, -0.62, 0.62);
-          const headingAbs = Math.abs(yawDelta);
-          let desiredForward = 0.44;
-          if (headingAbs > 0.75) {
-            desiredForward = 0;
-          } else if (headingAbs > 0.4) {
-            desiredForward = 0.12;
-          }
-
-          const speedScale =
-            goalDistance < 0.45
-              ? clamp(goalDistance / 0.45, 0.16, 1)
-              : clamp(1 - projection.distance * 0.95, 0.35, 1);
-          const desiredSpeed = autoNavSpeed * speedScale;
-
-          const maxForwardDelta = 0.8 * delta;
-          const maxTurnDelta = 1.15 * delta;
-          const maxSpeedDelta = 0.52 * delta;
-
-          autoCommandState.forward = moveTowards(autoCommandState.forward, desiredForward, maxForwardDelta);
-          autoCommandState.lateral = moveTowards(autoCommandState.lateral, 0, maxForwardDelta);
-          autoCommandState.turn = moveTowards(autoCommandState.turn, desiredTurn, maxTurnDelta);
-          autoCommandState.speed = moveTowards(autoCommandState.speed, desiredSpeed, maxSpeedDelta);
-
-          turnInput = autoCommandState.turn;
-          forwardInput = autoCommandState.forward;
-          lateralInput = 0;
-          currentMoveSpeed = autoCommandState.speed;
         }
       }
     }
