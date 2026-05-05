@@ -109,9 +109,13 @@
 
 のような差し替えを、UI や Three.js 描画全体を大きく崩さずに進めやすくなっています。
 
+つまりこのビューアは、経路計画や経路追従の方式を入れ替えて、見た目や挙動を同じ土台の上で比較、検証しやすいことも特徴の 1 つです。
+
 ## 経路計画モジュールの入出力
 
 `web/modules/path-planners.js` の planner は、概ね次の入力を受け取ります。
+
+### 入力
 
 - `start`
   始点 `{ x, z }`
@@ -126,7 +130,7 @@
 - `clearance`
   ロボット半径や安全余白込みのマージン
 
-planner は次の出力を返します。
+### 出力
 
 - `ok`
   経路生成成功可否
@@ -145,7 +149,7 @@ planner は次の出力を返します。
 - `reason`
   失敗時の理由
 
-この形を守れば、別の planner を追加して `plannerModules` に登録できます。
+この形を守れば、別の planner を追加して `plannerModules` に登録できます。つまり、同じマップ、同じ障害物、同じ始点終点条件で planner を差し替えて比較しやすい構成です。
 
 ## 経路追従モジュールの入出力
 
@@ -155,13 +159,13 @@ planner は次の出力を返します。
 
 自律移動開始時に一度だけ呼ばれ、追従用の内部状態を返します。
 
-入力例:
+入力:
 
 - `plannerState`
 - `motionState`
 - `projectPointOntoPath`
 
-出力例:
+出力:
 
 - `autoSegmentIndex`
 - `autoSegmentPhase`
@@ -172,7 +176,7 @@ planner は次の出力を返します。
 
 毎フレーム呼ばれ、追従の結果として制御コマンドを返します。
 
-入力例:
+入力:
 
 - `plannerState`
 - `motionState`
@@ -185,7 +189,7 @@ planner は次の出力を返します。
 - `projectPointOntoPath`
 - `samplePathAtProgress`
 
-出力例:
+出力:
 
 - `done`
   ゴール到達などで終了したか
@@ -194,7 +198,7 @@ planner は次の出力を返します。
 - `command`
   `forwardInput`, `lateralInput`, `turnInput`, `autoMoveDirection`, `currentMoveSpeed` など
 
-この形を守れば、追従の中身を差し替えても `viewer.js` 側の変更は最小限で済みます。
+この形を守れば、追従の中身を差し替えても `viewer.js` 側の変更は最小限で済みます。つまり、同じ経路に対して別の follower を載せ替え、追従の安定性や挙動の違いを見比べやすい構成です。
 
 ## 起動方法
 
