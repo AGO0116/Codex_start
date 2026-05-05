@@ -10,6 +10,11 @@ This project currently focuses on:
 - path planning and autonomous path tracking
 - a separate 3D map editor
 
+<img width="1917" height="910" alt="image" src="https://github.com/user-attachments/assets/2161b38f-4cd0-40aa-b2bc-83e43c8245d4" />
+<img width="1910" height="898" alt="image" src="https://github.com/user-attachments/assets/5af936f0-4beb-439d-a598-8ff2a44fc174" />
+<img width="1916" height="903" alt="image" src="https://github.com/user-attachments/assets/7ed41186-1846-4f51-9ce8-0d98e62a1aa7" />
+
+
 ## What It Does
 
 - Renders a 3D map in the browser with obstacles, route markers, and robot models
