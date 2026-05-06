@@ -11,7 +11,7 @@
 
 # URL
 
-ブラウザベースで使用できます。
+WebGLで動いており、ブラウザベースで使用できます。
 **[Robot-nav-viewer Demo url](https://gou-asaga.github.io/robot-nav-viewer/web/)**
 
 ## スクリーンショット
