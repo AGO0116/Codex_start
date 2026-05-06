@@ -142,6 +142,9 @@ const go2PolylineFollower = {
       if (startDistance < 0.04 || moveDistance >= startDistance - 1e-6) {
         motionState.x = startPoint.x;
         motionState.z = startPoint.z;
+        if (typeof startPoint.y === "number" && motionState.isGrounded) {
+          motionState.supportY = startPoint.y;
+        }
         followerState.autoSegmentIndex = followerState.autoEntryTargetIndex;
         followerState.autoSegmentPhase = "align";
         command.forwardInput = 0;
@@ -198,6 +201,9 @@ const go2PolylineFollower = {
       if (reachedWaypoint || moveDistance >= waypointDistance - 1e-6) {
         motionState.x = targetPoint.x;
         motionState.z = targetPoint.z;
+        if (typeof targetPoint.y === "number" && motionState.isGrounded) {
+          motionState.supportY = targetPoint.y;
+        }
         if (isEntrySegment) {
           followerState.autoEntryPoint = null;
         }

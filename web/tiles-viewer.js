@@ -9,6 +9,7 @@ import {
   samplePathAtProgress,
 } from "./modules/path-planners.js";
 import { followerModules } from "./modules/path-followers.js";
+import { planTilesRoute } from "./modules/tiles-route-planner.js";
 import {
   createRuntimeMapState,
 } from "./modules/map-state.js";
@@ -1217,6 +1218,7 @@ export async function main(appModeOverride) {
   const cameraScreenUp = new THREE.Vector3();
   const robotForwardWorld = new THREE.Vector3();
   const robotRightWorld = new THREE.Vector3();
+  const robotBasisMatrix = new THREE.Matrix4();
   const raycaster = new THREE.Raycaster();
   const tilesFloorRaycaster = new THREE.Raycaster();
   const tilesWallRaycaster = new THREE.Raycaster();
@@ -1367,6 +1369,17 @@ export async function main(appModeOverride) {
     saveCurrentViewState(modeState.mapMode);
   }
 
+  function updateOrbitReticle() {
+    const reticle = document.getElementById("orbit-reticle");
+    if (!reticle) {
+      return;
+    }
+    // The camera always looks at orbitState.target in free/editor view, so a fixed
+    // center reticle is more stable than re-projecting the target every frame.
+    const visible = cameraState.mode === "free" || editorState.isOpen;
+    reticle.classList.toggle("is-visible", visible);
+  }
+
   function tilesLocalToWorld(x, y, z, target = new THREE.Vector3()) {
     if (!modeState.tilesFrame) {
       return target.set(x, y, z);
@@ -1420,9 +1433,16 @@ export async function main(appModeOverride) {
           motionState.z,
           robot.root.position
         );
-        const alignQuat = new THREE.Quaternion().setFromUnitVectors(upAxis, modeState.tilesFrame.up);
-        const yawQuat = new THREE.Quaternion().setFromAxisAngle(modeState.tilesFrame.up, motionState.yaw);
-        robot.root.quaternion.copy(yawQuat).multiply(alignQuat);
+        // Build the robot orientation from the local PLATEAU frame so rendered
+        // yaw, manual controls, and autonomous path heading share one basis.
+        robotForwardWorld
+          .copy(modeState.tilesFrame.east)
+          .multiplyScalar(Math.cos(motionState.yaw))
+          .addScaledVector(modeState.tilesFrame.north, -Math.sin(motionState.yaw))
+          .normalize();
+        robotRightWorld.crossVectors(robotForwardWorld, modeState.tilesFrame.up).normalize();
+        robotBasisMatrix.makeBasis(robotForwardWorld, modeState.tilesFrame.up, robotRightWorld);
+        robot.root.quaternion.setFromRotationMatrix(robotBasisMatrix);
       } else {
         robot.root.position.set(motionState.x, motionState.groundOffset + motionState.supportY + motionState.jumpY, motionState.z);
         robot.root.rotation.set(0, motionState.yaw, 0);
@@ -1485,8 +1505,48 @@ export async function main(appModeOverride) {
   }
 
   function setMarkerPosition(marker, point, supportY) {
+    if (modeState.mapMode === "tiles3d" && modeState.tilesFrame) {
+      tilesAnchoredLocalToWorld(point.x, (point.y ?? supportY ?? 0) + 0.12, point.z, marker.position);
+      marker.quaternion.setFromUnitVectors(upAxis, modeState.tilesFrame.up);
+      marker.visible = true;
+      return;
+    }
+    marker.quaternion.identity();
     marker.position.set(point.x, supportY + 0.07, point.z);
     marker.visible = true;
+  }
+
+  function buildTilesPathRenderables(path) {
+    const group = new THREE.Group();
+    const points = path.map((point) => {
+      const worldPoint = new THREE.Vector3();
+      tilesAnchoredLocalToWorld(point.x, (point.y ?? 0) + 0.14, point.z, worldPoint);
+      return worldPoint;
+    });
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({
+        color: 0x1d8f4d,
+        transparent: true,
+        opacity: 0.98,
+      })
+    );
+    group.add(line);
+
+    for (const point of path) {
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.13, 12, 8),
+        new THREE.MeshStandardMaterial({
+          color: 0x4de18b,
+          emissive: 0x123d25,
+          roughness: 0.55,
+        })
+      );
+      tilesAnchoredLocalToWorld(point.x, (point.y ?? 0) + 0.2, point.z, dot.position);
+      group.add(dot);
+    }
+
+    return group;
   }
 
   function refreshSceneGeometry() {
@@ -1517,6 +1577,7 @@ export async function main(appModeOverride) {
     plannerState.followerKey = null;
     plannerState.followerState = null;
     clearRouteRender();
+    showTilesRouteDebugPanel(false);
     showPlannerDebugPanel(false);
     stopAutoNav();
   }
@@ -1574,6 +1635,123 @@ export async function main(appModeOverride) {
       return;
     }
     detail.textContent = `local x ${motionState.x.toFixed(2)} / z ${motionState.z.toFixed(2)} / floor ${motionState.supportY.toFixed(2)} / yaw ${Math.round((-motionState.yaw * 180) / Math.PI)}deg`;
+  }
+
+  function showTilesRouteDebugPanel(visible) {
+    const panel = document.getElementById("tiles-route-debug");
+    if (!panel) {
+      return;
+    }
+    panel.classList.toggle("is-visible", visible);
+    panel.setAttribute("aria-hidden", visible ? "false" : "true");
+  }
+
+  function drawTilesRouteDebugView(debugData, statusText = "Search") {
+    const canvas = document.getElementById("tiles-route-debug-canvas");
+    if (!canvas || !debugData) {
+      showTilesRouteDebugPanel(false);
+      return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#07101a";
+    ctx.fillRect(0, 0, width, height);
+
+    const allPoints = [
+      debugData.start,
+      debugData.goal,
+      ...(debugData.visitedNodes ?? []),
+      ...(debugData.rawPath ?? []),
+      ...(debugData.path ?? []),
+    ].filter(Boolean);
+    if (allPoints.length === 0) {
+      return;
+    }
+
+    const pad = 16;
+    const minX = Math.min(...allPoints.map((point) => point.x));
+    const maxX = Math.max(...allPoints.map((point) => point.x));
+    const minZ = Math.min(...allPoints.map((point) => point.z));
+    const maxZ = Math.max(...allPoints.map((point) => point.z));
+    const spanX = Math.max(1, maxX - minX);
+    const spanZ = Math.max(1, maxZ - minZ);
+    const scale = Math.min((width - pad * 2) / spanX, (height - pad * 2) / spanZ);
+    const toCanvas = (point) => ({
+      x: pad + (point.x - minX) * scale,
+      y: height - pad - (point.z - minZ) * scale,
+    });
+
+    ctx.strokeStyle = "rgba(126, 208, 255, 0.12)";
+    ctx.lineWidth = 1;
+    for (let x = Math.floor(minX); x <= Math.ceil(maxX); x += 2) {
+      const p0 = toCanvas({ x, z: minZ });
+      const p1 = toCanvas({ x, z: maxZ });
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+    for (let z = Math.floor(minZ); z <= Math.ceil(maxZ); z += 2) {
+      const p0 = toCanvas({ x: minX, z });
+      const p1 = toCanvas({ x: maxX, z });
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = "rgba(126, 208, 255, 0.34)";
+    for (const node of debugData.visitedNodes ?? []) {
+      const p = toCanvas(node);
+      ctx.fillRect(p.x - 1.3, p.y - 1.3, 2.6, 2.6);
+    }
+
+    if (debugData.rawPath?.length > 1) {
+      ctx.strokeStyle = "rgba(255, 176, 118, 0.62)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      debugData.rawPath.forEach((point, index) => {
+        const p = toCanvas(point);
+        if (index === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+    }
+
+    if (debugData.path?.length > 1) {
+      ctx.strokeStyle = "#4de18b";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      debugData.path.forEach((point, index) => {
+        const p = toCanvas(point);
+        if (index === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+    }
+
+    const start = toCanvas(debugData.start);
+    ctx.fillStyle = "#4de18b";
+    ctx.beginPath();
+    ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const goal = toCanvas(debugData.goal);
+    ctx.fillStyle = "#ff7a7a";
+    ctx.beginPath();
+    ctx.arc(goal.x, goal.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const modeLabel = debugData.plannerMode ? ` / ${debugData.plannerMode}` : "";
+    document.querySelector('[data-role="tiles-debug-state"]').textContent = `${statusText}${modeLabel}`;
+    document.querySelector('[data-role="tiles-debug-visited"]').textContent = String(debugData.visitedNodes?.length ?? 0);
+    document.querySelector('[data-role="tiles-debug-raw"]').textContent = String(debugData.rawPath?.length ?? 0);
+    document.querySelector('[data-role="tiles-debug-final"]').textContent = String(debugData.path?.length ?? 0);
+    document.querySelector('[data-role="tiles-debug-margin"]').textContent = `${(debugData.clearanceRadius ?? 0).toFixed(2)}m`;
+    showTilesRouteDebugPanel(true);
   }
 
   function syncMapModeSceneVisibility() {
@@ -1806,6 +1984,47 @@ export async function main(appModeOverride) {
     };
   }
 
+  function planTilesPath() {
+    if (!modeState.tilesetLoaded || !modeState.tilesSpawned) {
+      return { ok: false, reason: "tiles-not-ready" };
+    }
+    if (!plannerState.start || !plannerState.goal) {
+      return { ok: false, reason: "missing-endpoints" };
+    }
+
+    const start = {
+      x: plannerState.start.x,
+      z: plannerState.start.z,
+      y: plannerState.start.y ?? findTilesSupportY(plannerState.start.x, plannerState.start.z, motionState.supportY),
+    };
+    const goal = {
+      x: plannerState.goal.x,
+      z: plannerState.goal.z,
+      y: plannerState.goal.y ?? findTilesSupportY(plannerState.goal.x, plannerState.goal.z, start.y ?? motionState.supportY),
+    };
+    if (start.y === null || goal.y === null) {
+      return { ok: false, reason: "missing-surface" };
+    }
+
+    try {
+      return planTilesRoute({
+        start,
+        goal,
+        findSupportY: findTilesSupportY,
+        isHorizontalBlocked: isTilesHorizontalMotionBlocked,
+        robotRadius: activeRobot.collisionRadius,
+        options: {
+          maxUpStep: tilesStepHeight,
+          maxDownStep: 0.95,
+          clearance: activeRobot.collisionRadius + 0.12,
+        },
+      });
+    } catch (error) {
+      console.error(error);
+      return { ok: false, reason: "planner-error" };
+    }
+  }
+
   function placeRobotOnTilesSpawn() {
     const spawnPoint = findTilesSpawnFromVisibleBounds() ?? findTilesSpawnSurface();
     if (!modeState.tilesSpawned && sceneRefs.tilesGroupOffset) {
@@ -1962,7 +2181,7 @@ export async function main(appModeOverride) {
 
       const updateTilesDebugStatus = (prefix = "3D Tiles loaded") => {
         updatePlannerStatus(
-          `${prefix}. models ${loadedModelCount}, visible ${visibleTiles.size}. Current navigation still uses the flat map and manual obstacle layout.`
+          `${prefix}. models ${loadedModelCount}, visible ${visibleTiles.size}. Set Start and Goal on tile surfaces, then Plan for step-aware 3D routing.`
         );
       };
 
@@ -2082,7 +2301,7 @@ export async function main(appModeOverride) {
         modeState.tilesetPanelOpen = true;
         syncMapModeSceneVisibility();
         syncTilesetControls();
-        updatePlannerStatus("3D Tiles mode active. Current navigation still uses the flat map and manual obstacle layout.");
+        updatePlannerStatus("3D Tiles mode active. Set Start and Goal on tile surfaces, then Plan.");
         return true;
       }
     } else {
@@ -2240,7 +2459,8 @@ export async function main(appModeOverride) {
       [["S"], "Move backward"],
       [["D"], "Move right"],
       [["Left", "Right"], "Yaw turn"],
-      [["LMB"], "Orbit camera in free view"],
+      [["LMB"], "Orbit around the center reticle"],
+      [["Double", "Click"], "Move orbit center to the clicked surface"],
       [["RMB"], "Pan camera in free view"],
       [["Wheel"], "Zoom camera"],
       [["F"], "Sprint forward"],
@@ -2256,7 +2476,8 @@ export async function main(appModeOverride) {
     const editorItems = [
       [["LMB"], "Select or place objects"],
       [["Drag"], "Move the selected box on the map plane"],
-      [["LMB", "Empty"], "Orbit on empty space"],
+      [["LMB", "Empty"], "Orbit around the center reticle"],
+      [["Double", "Click"], "Move orbit center to the clicked surface"],
       [["RMB"], "Pan the view"],
       [["Wheel"], "Zoom in or out"],
       [["Apply"], "Save the edited map"],
@@ -2589,17 +2810,77 @@ export async function main(appModeOverride) {
   }
 
   function setStartToRobotPosition() {
-    const startPoint = worldToMapPoint(activeRobot.root.position);
+    if (modeState.mapMode === "tiles3d" && !modeState.tilesSpawned) {
+      updatePlannerStatus("Load 3D Tiles and spawn the robot before setting the start point.");
+      return;
+    }
+    const startPoint = modeState.mapMode === "tiles3d"
+      ? { x: motionState.x, z: motionState.z, y: motionState.supportY }
+      : worldToMapPoint(activeRobot.root.position);
     plannerState.start = startPoint;
     setMarkerPosition(startMarker, startPoint, motionState.supportY);
     clearPathState();
     setPlannerMode("start");
-    updatePlannerStatus("Start point set to robot position. Click the map to move it.");
+    updatePlannerStatus(
+      modeState.mapMode === "tiles3d"
+        ? "Start point set to robot position. Click a tile surface to move it."
+        : "Start point set to robot position. Click the map to move it."
+    );
   }
 
   function planCurrentPath() {
     if (!plannerState.start || !plannerState.goal) {
       updatePlannerStatus("Set both start and goal first.");
+      return;
+    }
+
+    if (modeState.mapMode === "tiles3d") {
+      const planResult = planTilesPath();
+      if (!planResult.ok) {
+        plannerState.path = null;
+        plannerState.polylineMetrics = null;
+        plannerState.smoothPath = null;
+        plannerState.smoothPathMetrics = null;
+        plannerState.debugData = null;
+        plannerState.autoActive = false;
+        plannerState.followerKey = null;
+        plannerState.followerState = null;
+        clearRouteRender();
+        showPlannerDebugPanel(false);
+        if (planResult.debugData) {
+          drawTilesRouteDebugView(planResult.debugData, "Failed");
+        } else {
+          showTilesRouteDebugPanel(false);
+        }
+        const reasonText = {
+          "tiles-not-ready": "Load 3D Tiles and spawn the robot before planning.",
+          "missing-endpoints": "Set both start and goal first.",
+          "missing-surface": "Start or goal is not on a walkable tile surface.",
+          "endpoint-clearance": "Start or goal is too close to a wall, column, or edge for the robot footprint.",
+          "search-budget": "3D Tiles path search stopped before finding a route. Try closer points or a clearer area.",
+          "planner-error": "3D Tiles planner failed. Try reloading the tileset or choosing closer route points.",
+          "no-tiles-path": "No step-aware 3D Tiles path found in the local search area.",
+        };
+        updatePlannerStatus(reasonText[planResult.reason] ?? "No 3D Tiles path found.");
+        return;
+      }
+
+      plannerState.path = planResult.path;
+      plannerState.polylineMetrics = planResult.polylineMetrics;
+      plannerState.smoothPath = planResult.smoothPath;
+      plannerState.smoothPathMetrics = planResult.smoothPathMetrics;
+      plannerState.debugData = null;
+      plannerState.autoActive = false;
+      plannerState.followerKey = null;
+      plannerState.followerState = null;
+      clearRouteRender();
+      routeGroup.add(buildTilesPathRenderables(plannerState.path));
+      routeGroup.visible = true;
+      showPlannerDebugPanel(false);
+      drawTilesRouteDebugView(planResult.debugData, "Solved");
+      updatePlannerStatus(
+        `3D path planned. ${plannerState.path.length} waypoints / ${planResult.totalLength.toFixed(2)}m / ${planResult.visitedCount ?? 0} searched.`
+      );
       return;
     }
 
@@ -2767,6 +3048,32 @@ export async function main(appModeOverride) {
     raycaster.setFromCamera(pointer, camera);
   }
 
+  function focusOrbitTargetFromPointer(event) {
+    if (cameraState.mode !== "free" || editorState.isOpen || plannerState.mode || modeState.tilesSpawnArmed) {
+      return;
+    }
+    setPointerFromEvent(event);
+
+    // Double-click recenters the free camera orbit on an actual map surface.
+    if (modeState.mapMode === "tiles3d") {
+      const tileHits = raycaster
+        .intersectObjects(getTileCollisionMeshList(), false)
+        .filter((hit) => getHitNormalDotUp(hit) > 0.18);
+      if (tileHits.length === 0) {
+        return;
+      }
+      orbitState.target.copy(tileHits[0].point);
+    } else if (raycaster.ray.intersectPlane(floorPlane, planeHit)) {
+      orbitState.target.copy(planeHit);
+    } else {
+      return;
+    }
+
+    clampOrbitTarget();
+    saveCurrentViewState(modeState.mapMode);
+    updateOrbitReticle();
+  }
+
   function intersectGroundPlaneAtY(y) {
     const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -y);
     return raycaster.ray.intersectPlane(dragPlane, planeHit);
@@ -2795,6 +3102,31 @@ export async function main(appModeOverride) {
     if (modeState.mapMode === "tiles3d" && !editorState.isOpen) {
       if (event.button === 2) {
         beginCameraDrag(event, "pan");
+        return;
+      }
+
+      if (event.button === 0 && plannerState.mode) {
+        const tileHits = raycaster
+          .intersectObjects(getTileCollisionMeshList(), false)
+          .filter((hit) => getHitNormalDotUp(hit) > 0.35);
+        if (tileHits.length === 0) {
+          updatePlannerStatus("Click an upward-facing tile surface to place the route point.");
+          return;
+        }
+        const hit = tileHits[0];
+        const local = worldToTilesLocal(hit.point.clone());
+        const point = { x: local.x, z: local.z, y: local.y };
+        if (plannerState.mode === "start") {
+          plannerState.start = point;
+          setMarkerPosition(startMarker, point, point.y);
+          updatePlannerStatus("3D Tiles start point set.");
+        } else {
+          plannerState.goal = point;
+          setMarkerPosition(goalMarker, point, point.y);
+          updatePlannerStatus("3D Tiles goal point set.");
+        }
+        clearPlannedPath();
+        setPlannerMode(null);
         return;
       }
 
@@ -3148,6 +3480,7 @@ export async function main(appModeOverride) {
   renderer.domElement.addEventListener("pointermove", onPointerMove);
   renderer.domElement.addEventListener("pointerup", onPointerUp);
   renderer.domElement.addEventListener("pointercancel", onPointerUp);
+  renderer.domElement.addEventListener("dblclick", focusOrbitTargetFromPointer);
   renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
   renderer.domElement.addEventListener("contextmenu", (event) => {
     event.preventDefault();
@@ -3434,16 +3767,21 @@ export async function main(appModeOverride) {
           turnSpeed,
           autoNavSpeed,
           sprintSpeed,
-          halfWidth,
-          halfHeight,
+          halfWidth: modeState.mapMode === "tiles3d" ? Number.POSITIVE_INFINITY : halfWidth,
+          halfHeight: modeState.mapMode === "tiles3d" ? Number.POSITIVE_INFINITY : halfHeight,
           autoCommandState,
-          resolveMotionWithSteps,
+          resolveMotionWithSteps: modeState.mapMode === "tiles3d"
+            ? (nextX, nextZ, currentX, currentZ, currentSupportY, radius) =>
+              resolveTilesMotion(nextX, nextZ, currentX, currentZ, currentSupportY, radius)
+            : resolveMotionWithSteps,
           projectPointOntoPath,
           samplePathAtProgress,
         });
 
         if (followerResult?.done) {
-          plannerState.start = worldToMapPoint(activeRobot.root.position);
+          plannerState.start = modeState.mapMode === "tiles3d"
+            ? { x: motionState.x, z: motionState.z, y: motionState.supportY }
+            : worldToMapPoint(activeRobot.root.position);
           setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
           stopAutoNav(followerResult.statusText ?? "Goal reached.");
         } else if (followerResult?.command) {
@@ -3476,33 +3814,23 @@ export async function main(appModeOverride) {
       poseTurnInput = 0;
     }
 
+    if (modeState.mapMode === "tiles3d" && !plannerState.autoActive) {
+      // In the anchored 3D Tiles frame, manual key yaw is mirrored relative to
+      // the sandbox sign convention. Keep autonomous follower yaw untouched.
+      turnInput *= -1;
+      poseTurnInput *= -1;
+    }
+
     if (!directAutoMotion) {
       motionState.yaw += turnInput * turnSpeed * delta;
 
       if (autoMoveDirection) {
         moveDirection.set(autoMoveDirection.x, 0, autoMoveDirection.z);
       } else if (modeState.mapMode === "tiles3d" && modeState.tilesFrame && modeState.tilesSpawned) {
-        syncActiveRobotTransform();
-        robotForwardWorld
-          .set(1, 0, 0)
-          .applyQuaternion(activeRobot.root.quaternion)
-          .projectOnPlane(getTilesUpAxis());
-        robotRightWorld
-          .set(0, 0, 1)
-          .applyQuaternion(activeRobot.root.quaternion)
-          .projectOnPlane(getTilesUpAxis());
-        if (robotForwardWorld.lengthSq() > 1e-8) {
-          robotForwardWorld.normalize();
-        }
-        if (robotRightWorld.lengthSq() > 1e-8) {
-          robotRightWorld.normalize();
-        }
         moveDirection.set(
-          robotForwardWorld.dot(modeState.tilesFrame.east) * forwardInput +
-            robotRightWorld.dot(modeState.tilesFrame.east) * lateralInput,
+          Math.cos(motionState.yaw) * forwardInput - Math.sin(motionState.yaw) * lateralInput,
           0,
-          robotForwardWorld.dot(modeState.tilesFrame.north) * forwardInput +
-            robotRightWorld.dot(modeState.tilesFrame.north) * lateralInput
+          -Math.sin(motionState.yaw) * forwardInput - Math.cos(motionState.yaw) * lateralInput
         );
       } else if (modeState.mapMode === "tiles3d") {
         moveDirection.set(0, 0, 0);
@@ -3663,6 +3991,7 @@ export async function main(appModeOverride) {
       chaseLookAt.addScaledVector(currentUp, modeState.mapMode === "tiles3d" ? 0.18 : 0.42 + motionState.jumpY * 0.25 + crouchOffset * 0.3);
     }
     camera.lookAt(chaseLookAt);
+    updateOrbitReticle();
 
     syncPoseToHud();
     syncPositionPanel();

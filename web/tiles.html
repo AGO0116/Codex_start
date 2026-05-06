@@ -36,6 +36,44 @@
         color: var(--text);
       }
 
+      #orbit-reticle {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        z-index: 9;
+        width: 22px;
+        height: 22px;
+        pointer-events: none;
+        opacity: 0;
+        transform: translate(-50%, -50%);
+        transition: opacity 120ms ease;
+      }
+
+      #orbit-reticle::before,
+      #orbit-reticle::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        background: rgba(205, 234, 255, 0.78);
+        box-shadow: 0 0 8px rgba(126, 208, 255, 0.34);
+        transform: translate(-50%, -50%);
+      }
+
+      #orbit-reticle::before {
+        width: 16px;
+        height: 1px;
+      }
+
+      #orbit-reticle::after {
+        width: 1px;
+        height: 16px;
+      }
+
+      #orbit-reticle.is-visible {
+        opacity: 0.78;
+      }
+
       #hud {
         position: fixed;
         top: 18px;
@@ -355,6 +393,33 @@
         display: block;
       }
 
+      #tiles-route-debug {
+        position: fixed;
+        top: 18px;
+        right: 106px;
+        z-index: 12;
+        width: min(320px, calc(100vw - 132px));
+        padding: 14px;
+        border: 1px solid rgba(126, 208, 255, 0.2);
+        border-radius: 18px;
+        background: rgba(8, 14, 24, 0.88);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+        display: none;
+      }
+
+      #tiles-route-debug.is-visible {
+        display: block;
+      }
+
+      .tiles-debug-canvas {
+        width: 100%;
+        margin-top: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(5, 9, 16, 0.88);
+      }
+
       .debug-head {
         display: flex;
         align-items: baseline;
@@ -578,6 +643,7 @@
     </style>
   </head>
   <body data-app-mode="tiles">
+    <div id="orbit-reticle" aria-hidden="true"></div>
     <div id="hud">
       <div class="eyebrow">PLATEAU 3D Tiles</div>
       <h1>Robot City Viewer</h1>
@@ -662,6 +728,24 @@
       </div>
       <div class="position-value" data-role="position-detail">Load a tileset and spawn the robot.</div>
     </aside>
+    <aside id="tiles-route-debug" aria-hidden="true">
+      <div class="debug-head">
+        <h2 class="debug-title">3D Route Search</h2>
+        <span class="debug-subtle" data-role="tiles-debug-state">Idle</span>
+      </div>
+      <canvas
+        id="tiles-route-debug-canvas"
+        class="tiles-debug-canvas"
+        width="292"
+        height="210"
+      ></canvas>
+      <div class="debug-stats">
+        <div class="debug-stat"><span class="spec-label">Visited</span><span class="spec-value" data-role="tiles-debug-visited">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Raw</span><span class="spec-value" data-role="tiles-debug-raw">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Final</span><span class="spec-value" data-role="tiles-debug-final">0</span></div>
+        <div class="debug-stat"><span class="spec-label">Margin</span><span class="spec-value" data-role="tiles-debug-margin">0m</span></div>
+      </div>
+    </aside>
     <aside id="planner-debug" aria-hidden="true">
       <div class="debug-head">
         <h2 class="debug-title">Path Planning</h2>
@@ -720,6 +804,6 @@
         <span>Show or hide this guide</span>
       </div>
     </aside>
-    <script type="module" src="./tiles-main.js?v=20260506-tiles-presets-position-steps"></script>
+    <script type="module" src="./tiles-main.js?v=20260507-tiles-reticle-controls"></script>
   </body>
 </html>
