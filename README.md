@@ -1,6 +1,6 @@
 # robot-nav-viewer
 
-`robot-nav-viewer` は、ブラウザ上でロボットの移動、経路計画、経路追従、3Dマップ編集、PLATEAU 3D Tiles表示を試すための 3D ビューアーです。
+`robot-nav-viewer` は、ブラウザ上で、ロボットの移動操作、経路計画、経路追従、などをエディタ上で作成できる3Dマップや、PLATEAU3D都市モデルのオープンデータを用いて試行出来る3Dビューアーです。
 
 現在は主に次のロボットを扱います。
 
@@ -22,6 +22,13 @@
 ### マップ編集画面
 
 <img width="1916" height="903" alt="editor" src="https://github.com/user-attachments/assets/7ed41186-1846-4f51-9ce8-0d98e62a1aa7" />
+
+### 3D都市モデルデータの描画（渋谷地下など）
+<img width="1912" height="946" alt="image" src="https://github.com/user-attachments/assets/fcfee603-be3e-4753-8dc5-06161b9eeefe" />
+
+### 3D都市モデル上での操作
+<img width="1915" height="935" alt="image" src="https://github.com/user-attachments/assets/9b8c0a43-707b-432c-84e2-7a439201856a" />
+
 
 ## 主な機能
 
