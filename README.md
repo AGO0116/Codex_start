@@ -9,6 +9,11 @@
 
 研究・検証用の軽量ビューアーとして、ロボット、地形、障害物、経路生成、追従制御を同じ画面上で見ながら調整できます。
 
+# URL
+
+ブラウザベースで使用できます。
+**[Robot-nav-viewer Demo url](https://gou-asaga.github.io/robot-nav-viewer/web/)**
+
 ## スクリーンショット
 
 ### ロボット操作画面
