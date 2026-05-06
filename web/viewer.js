@@ -1877,6 +1877,7 @@ async function main() {
       [["F"], "Sprint forward"],
       [["Shift"], "Sneak"],
       [["Space"], "Jump"],
+      [["Touch"], "Use the on-screen pads on mobile"],
       [["Start"], "Place route start"],
       [["Goal"], "Place route goal"],
       [["Plan"], "Build shortest path"],
@@ -2423,6 +2424,48 @@ async function main() {
   window.addEventListener("keydown", (event) => onKeyChange(event, true));
   window.addEventListener("keyup", (event) => onKeyChange(event, false));
 
+  function setVirtualControl(control, isPressed) {
+    if (control === "jump") {
+      if (isPressed && motionState.isGrounded && activeRobot.canJump) {
+        motionState.velocityY = jumpSpeed;
+        motionState.isGrounded = false;
+      }
+      return;
+    }
+    if (control in inputState) {
+      inputState[control] = isPressed;
+    }
+  }
+
+  function installMobileControls() {
+    const buttons = document.querySelectorAll("[data-control]");
+    for (const button of buttons) {
+      const control = button.dataset.control;
+      const press = (event) => {
+        event.preventDefault();
+        button.classList.add("is-pressed");
+        setVirtualControl(control, true);
+        button.setPointerCapture?.(event.pointerId);
+      };
+      const release = (event) => {
+        event.preventDefault();
+        button.classList.remove("is-pressed");
+        setVirtualControl(control, false);
+        if (button.hasPointerCapture?.(event.pointerId)) {
+          button.releasePointerCapture(event.pointerId);
+        }
+      };
+      button.addEventListener("pointerdown", press);
+      button.addEventListener("pointerup", release);
+      button.addEventListener("pointercancel", release);
+      button.addEventListener("pointerleave", release);
+    }
+  }
+
+  function updateMobileControlsVisibility() {
+    document.getElementById("mobile-controls")?.classList.toggle("is-hidden", editorState.isOpen);
+  }
+
   function setPointerFromEvent(event) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -2772,6 +2815,7 @@ async function main() {
   renderer.domElement.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+  installMobileControls();
   hydrateHudButtons();
   hydrateGuidePanel();
   syncCameraModeButton();
@@ -3321,6 +3365,7 @@ async function main() {
     camera.lookAt(chaseLookAt);
 
     syncPoseToHud();
+    updateMobileControlsVisibility();
 
     renderer.render(scene, camera);
     requestAnimationFrame(animate);

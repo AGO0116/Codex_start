@@ -29,6 +29,7 @@
       body {
         margin: 0;
         overflow: hidden;
+        touch-action: none;
         font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
         background:
           radial-gradient(circle at top left, rgba(255, 122, 26, 0.2), transparent 30%),
@@ -612,6 +613,154 @@
         display: none;
       }
 
+      .mobile-controls {
+        display: none;
+      }
+
+      .mobile-controls.is-hidden {
+        display: none;
+      }
+
+      @media (max-width: 760px), (pointer: coarse) {
+        #hud {
+          top: 8px;
+          left: 8px;
+          width: min(360px, calc(100vw - 16px));
+          max-height: min(48vh, calc(100dvh - 178px));
+          padding: 12px;
+          border-radius: 16px;
+          font-size: 12px;
+        }
+
+        h1 {
+          font-size: 18px;
+        }
+
+        .specs {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          margin-top: 10px;
+        }
+
+        .planner {
+          margin-top: 10px;
+          padding-top: 10px;
+        }
+
+        .planner-group {
+          margin-top: 8px;
+          padding: 8px;
+        }
+
+        .planner-actions {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .action-button {
+          min-height: 46px;
+          padding: 8px;
+        }
+
+        .action-button strong {
+          font-size: 12px;
+        }
+
+        .action-button span {
+          font-size: 10px;
+        }
+
+        .guide-panel {
+          left: 8px;
+          right: 8px;
+          bottom: 150px;
+          width: auto;
+          max-height: 28vh;
+          overflow: auto;
+          padding: 12px;
+        }
+
+        .guide-item {
+          grid-template-columns: 82px 1fr;
+        }
+
+        .position-float-button {
+          top: auto;
+          right: 12px;
+          bottom: 150px;
+        }
+
+        .position-panel,
+        #tiles-route-debug,
+        #planner-debug {
+          top: auto;
+          right: 8px;
+          left: 8px;
+          bottom: 204px;
+          width: auto;
+          max-height: 34vh;
+          overflow: auto;
+        }
+
+        #tiles-route-debug {
+          bottom: 150px;
+        }
+
+        .mobile-controls {
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 20;
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-end;
+          gap: 14px;
+          padding: 0 14px max(14px, env(safe-area-inset-bottom));
+          pointer-events: none;
+        }
+
+        .mobile-pad,
+        .mobile-actions {
+          display: grid;
+          gap: 8px;
+          pointer-events: auto;
+        }
+
+        .mobile-pad {
+          grid-template-columns: repeat(3, 52px);
+          grid-template-rows: repeat(3, 52px);
+        }
+
+        .mobile-actions {
+          grid-template-columns: repeat(2, 56px);
+          grid-auto-rows: 52px;
+        }
+
+        .mobile-control {
+          border-radius: 16px;
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          background: rgba(8, 13, 22, 0.72);
+          color: #f7fbff;
+          font-weight: 800;
+          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+          backdrop-filter: blur(12px);
+          touch-action: none;
+          user-select: none;
+        }
+
+        .mobile-control:active,
+        .mobile-control.is-pressed {
+          background: rgba(255, 122, 26, 0.32);
+          border-color: rgba(255, 178, 118, 0.74);
+          transform: translateY(1px);
+        }
+
+        .mobile-empty {
+          visibility: hidden;
+        }
+      }
+
       .editor-form {
         display: grid;
         gap: 10px;
@@ -804,6 +953,25 @@
         <span>Show or hide this guide</span>
       </div>
     </aside>
-    <script type="module" src="./tiles-main.js?v=20260507-tiles-reticle-controls"></script>
+    <nav id="mobile-controls" class="mobile-controls" aria-label="Touch robot controls">
+      <div class="mobile-pad" aria-label="Move">
+        <span class="mobile-empty"></span>
+        <button class="mobile-control" type="button" data-control="forward">W</button>
+        <span class="mobile-empty"></span>
+        <button class="mobile-control" type="button" data-control="left">A</button>
+        <button class="mobile-control" type="button" data-control="backward">S</button>
+        <button class="mobile-control" type="button" data-control="right">D</button>
+        <span class="mobile-empty"></span>
+        <button class="mobile-control" type="button" data-control="sneak">Shift</button>
+        <span class="mobile-empty"></span>
+      </div>
+      <div class="mobile-actions" aria-label="Turn and jump">
+        <button class="mobile-control" type="button" data-control="turnLeft">←</button>
+        <button class="mobile-control" type="button" data-control="turnRight">→</button>
+        <button class="mobile-control" type="button" data-control="sprint">F</button>
+        <button class="mobile-control" type="button" data-control="jump">Jump</button>
+      </div>
+    </nav>
+    <script type="module" src="./tiles-main.js?v=20260507-mobile-controls"></script>
   </body>
 </html>
