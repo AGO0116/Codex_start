@@ -1,326 +1,277 @@
 # robot-nav-viewer
 
-脚型ロボットと車輪型ロボットの両方を扱える、ブラウザベースのナビゲーション研究用 3D ビューアです。
+`robot-nav-viewer` は、ブラウザ上でロボットの移動、経路計画、経路追従、3Dマップ編集、PLATEAU 3D Tiles表示を試すための 3D ビューアーです。
 
-現在は主に次の 2 機種を対象にしています。
+現在は主に次のロボットを扱います。
 
 - `Unitree Go2`
 - `TurtleBot3 Burger`
 
-主な機能:
+研究・検証用の軽量ビューアーとして、ロボット、地形、障害物、経路生成、追従制御を同じ画面上で見ながら調整できます。
 
-- 3D マップ表示
-- 手動操作
-- 経路生成
-- 自律移動
-- 3D マップ編集
+## 主な機能
 
-## スクリーンショット
+- Three.js による 3D ロボットビューアー
+- Go2 と TurtleBot3 Burger の切り替え表示
+- `WASD` による手動移動、左右キーによる yaw 回転、ジャンプ操作
+- 障害物を避ける経路計画
+- 経路生成過程を確認する 2D デバッグビュー
+- Go2 用の折れ線 waypoint 追従
+- TurtleBot3 用の曲線経路追従
+- 別画面の 3D Map Editor
+- 障害物の追加、削除、移動、リサイズ、高さ調整
+- ロボット初期スポーン位置の編集
+- PLATEAU 3D Tiles を読み込む 3D都市マップモード
+- Shibuya / Shinjuku / Chiyoda の PLATEAU プリセット選択
+- 3D Tiles 表面へのロボットスポーンと手動走行
 
-### ロボット操作画面
-<img width="1917" height="910" alt="viewer" src="https://github.com/user-attachments/assets/2161b38f-4cd0-40aa-b2bc-83e43c8245d4" />
-
-### 経路生成など
-<img width="1910" height="898" alt="planner" src="https://github.com/user-attachments/assets/5af936f0-4beb-439d-a598-8ff2a44fc174" />
-
-### マップ編集画面
-<img width="1916" height="903" alt="editor" src="https://github.com/user-attachments/assets/7ed41186-1846-4f51-9ce8-0d98e62a1aa7" />
-
-## できること
-
-- ブラウザ上で障害物つき 3D マップを表示
-- `Go2` と `TurtleBot3 Burger` を切り替えて表示
-- 手動でロボットを操作
-- 障害物を避ける経路を生成
-- 経路生成過程を 2D デバッグパネルで可視化
-- 別画面の `Map Editor` で障害物やスポーン位置を編集
-- 障害物を 3D 上で移動、拡大縮小
-
-## ロボットごとの挙動
-
-### Unitree Go2
-
-- 関節つきの 3D 四足モデル
-- 胴体座標系ベースの手動移動
-- 折れ線経路ベースの自律追従
-- 経路上の最近点から自然に合流して追従開始
-
-### TurtleBot3 Burger
-
-- STL メッシュを使った車輪型モデル
-- 曲線経路ベースの自律追従
-- 車輪回転アニメーション
-
-注意:
-
-- TurtleBot3 の見た目位置合わせはまだ調整中です。車体、車輪、センサの位置関係には微調整が残っている可能性があります。
-
-## 画面構成
+## 画面
 
 ### Viewer
 
 - ファイル: `web/index.html`
-- 用途: ロボット操作、経路生成、自律移動、デバッグ表示
+- 通常の簡易3Dマップ、ロボット操作、経路計画、経路追従を行う画面です。
 
-### Editor
+### Map Editor
 
 - ファイル: `web/editor.html`
-- 用途: 3D マップ編集専用画面
+- 障害物、マップサイズ、ロボットのスポーン位置を編集する画面です。
+- Viewer とは別画面として開き、`Close` で戻ります。
 
-## 主なファイル
+### 3D Tiles / PLATEAU Viewer
 
-- `web/index.html`
-  ビューア画面の UI と HUD
-- `web/editor.html`
-  マップ編集画面
-- `web/viewer.js`
-  Three.js 本体、ロボット描画、入力、経路生成、エディタ操作をまとめるアプリ本体
-- `web/modules/map-state.js`
-  マップ設定、障害物配列、ローカル保存状態の読み書き
-- `web/modules/path-planners.js`
-  経路計画アルゴリズム
-- `web/modules/path-followers.js`
-  経路追従アルゴリズム
-- `web/modules/planner-debug-view.js`
-  右側の 2D 経路可視化パネル描画
-- `web/assets/go2/`
-  Go2 用アセットと出典
-- `web/assets/turtlebot3/`
-  TurtleBot3 用アセットと出典
-- `config/go2_map.json`
-  初期マップ設定
-- `scripts/create_go2_map.py`
-  旧 2D SVG マップ生成スクリプト
-
-## モジュール分割について
-
-現在の構成では、経路計画と経路追従を `viewer.js` から切り離し、差し替えやすい形に寄せています。
-
-- `plannerModules`
-  経路生成の切り替えポイント
-- `followerModules`
-  経路追従の切り替えポイント
-
-これにより、たとえば
-
-- visibility graph 以外の planner
-- Go2 用の別の waypoint follower
-- TurtleBot3 用の pure pursuit 系 follower
-
-のような差し替えを、UI や Three.js 描画全体を大きく崩さずに進めやすくなっています。
-
-つまりこのビューアは、経路計画や経路追従の方式を入れ替えて、見た目や挙動を同じ土台の上で比較、検証しやすいことも特徴の 1 つです。
-
-## 経路計画モジュールの入出力
-
-`web/modules/path-planners.js` の planner は、概ね次の入力を受け取ります。
-
-### 入力
-
-- `start`
-  始点 `{ x, z }`
-- `goal`
-  終点 `{ x, z }`
-- `obstacleBounds`
-  障害物の 2D 境界矩形配列
-- `mapWidth`
-  マップ幅
-- `mapHeight`
-  マップ高さ
-- `clearance`
-  ロボット半径や安全余白込みのマージン
-
-### 出力
-
-- `ok`
-  経路生成成功可否
-- `path`
-  折れ線経路のノード列 `[{ x, z }, ...]`
-- `polylineMetrics`
-  折れ線経路長などの補助情報
-- `smoothPath`
-  平滑化された曲線サンプル列
-- `smoothPathMetrics`
-  曲線経路長などの補助情報
-- `totalLength`
-  最終経路長
-- `debugData`
-  可視グラフ、raw path、最終 path、膨張障害物などのデバッグ描画用情報
-- `reason`
-  失敗時の理由
-
-この形を守れば、別の planner を追加して `plannerModules` に登録できます。つまり、同じマップ、同じ障害物、同じ始点終点条件で planner を差し替えて比較しやすい構成です。
-
-## 経路追従モジュールの入出力
-
-`web/modules/path-followers.js` の follower は、主に 2 つの関数を持つ構成です。
-
-### `begin(...)`
-
-自律移動開始時に一度だけ呼ばれ、追従用の内部状態を返します。
-
-入力:
-
-- `plannerState`
-- `motionState`
-- `projectPointOntoPath`
-
-出力:
-
-- `autoSegmentIndex`
-- `autoSegmentPhase`
-- `pathProgress`
-- `autoEntryPoint`
-
-### `step(...)`
-
-毎フレーム呼ばれ、追従の結果として制御コマンドを返します。
-
-入力:
-
-- `plannerState`
-- `motionState`
-- `activeRobot`
-- `obstacleBounds`
-- `delta`
-- `turnSpeed`
-- `autoNavSpeed`
-- `resolveMotionWithSteps`
-- `projectPointOntoPath`
-- `samplePathAtProgress`
-
-出力:
-
-- `done`
-  ゴール到達などで終了したか
-- `statusText`
-  停止時に UI へ出すメッセージ
-- `command`
-  `forwardInput`, `lateralInput`, `turnInput`, `autoMoveDirection`, `currentMoveSpeed` など
-
-この形を守れば、追従の中身を差し替えても `viewer.js` 側の変更は最小限で済みます。つまり、同じ経路に対して別の follower を載せ替え、追従の安定性や挙動の違いを見比べやすい構成です。
+- ファイル: `web/tiles.html`
+- PLATEAU などの 3D Tiles データを読み込み、都市モデル上にロボットをスポーンして動かす画面です。
+- 通常 Viewer とは状態を分け、3D Tiles 用の読み込み、カメラ、スポーン操作を扱います。
 
 ## 起動方法
 
-リポジトリのルートでローカル HTTP サーバを起動します。
+リポジトリのルートでローカル HTTP サーバーを起動します。
 
 ```bash
 python -m http.server 8000
 ```
 
-Viewer:
+通常 Viewer:
 
 ```text
 http://localhost:8000/web/
 ```
 
-Editor:
+Map Editor:
 
 ```text
 http://localhost:8000/web/editor.html
+```
+
+3D Tiles / PLATEAU Viewer:
+
+```text
+http://localhost:8000/web/tiles.html
 ```
 
 ## 必要なもの
 
 - Python 3
 - WebGL 対応ブラウザ
-  - Google Chrome
-  - Microsoft Edge
-  - Firefox
-  - Safari
-- CDN 読み込み用のインターネット接続
-  - `three`
-  - `three/addons`
+- インターネット接続
+- CDN から読み込む `three` / `three/addons`
 
-## Viewer の操作
+推奨ブラウザ:
 
-### ロボット操作
+- Google Chrome
+- Microsoft Edge
+- Firefox
+
+## 操作
+
+### ロボット移動
 
 - `W`: 前進
 - `A`: 左移動
 - `S`: 後退
 - `D`: 右移動
-- `← / →`: yaw 回転
+- `←`: 左 yaw 回転
+- `→`: 右 yaw 回転
 - `F`: スプリント
 - `Shift`: スニーク
 - `Space`: ジャンプ
 
 ### カメラ
 
-- `Camera` ボタンで追従視点 / 自由視点を切り替え
-- 自由視点では:
-  - `LMB`: orbit
-  - `RMB`: pan
-  - `Wheel`: zoom
-
-### UI
-
+- `Camera`: ロボット追従視点 / 自由視点の切り替え
+- 自由視点の `LMB drag`: orbit
+- 自由視点の `RMB drag`: pan
+- `Wheel`: zoom
 - `E`: 操作ガイドの表示 / 非表示
 
-## 経路生成と自律移動
+## 経路計画と追従
 
-1. `Start` で始点を置く
-2. `Goal` で終点を置く
-3. `Plan` で障害物回避つき経路を生成
-4. `Auto` で自律追従を開始
+Viewer では `Start`、`Goal`、`Plan`、`Auto` を使って経路計画と自律移動を実行します。
 
-経路表示の考え方:
+基本の流れ:
 
-- `Go2` は折れ線経路を使って追従
-- `TurtleBot3` は平滑化した曲線経路を使って追従
+1. `Start` で開始点を置く
+2. `Goal` で目的地を置く
+3. `Plan` で障害物を避ける経路を生成する
+4. `Auto` で経路追従を開始する
 
-## Editor の操作
+ロボットごとの追従方針:
 
-- `LMB`: オブジェクト選択
-- `LMB drag`: 選択した障害物を移動
-- `空き地で LMB drag`: カメラ orbit
-- `RMB drag`: カメラ pan
-- `Wheel`: zoom
+- Go2 は緑の折れ線経路を使い、折れ曲がり地点を waypoint として順番に通過します。
+- Go2 は直線区間では直進し、折れ曲がり地点で yaw を調整します。
+- TurtleBot3 は曲線経路を使い、滑らかに旋回しながら追従します。
 
-選択した障害物には 3D ハンドルが表示されます。
+経路計画の可視化:
 
-- 水色: 幅
-- オレンジ: 奥行
-- ピンク: 高さ
+- `Plan` 実行時に、右側のデバッグパネルでノード、エッジ、障害物、安全範囲、最終経路を確認できます。
+- 2D デバッグマップは簡易マップの状態をもとに描画されます。
 
-## Editor のツール構成
+## Map Editor
 
-### Session
+Map Editor では 3D 表示のまま障害物を編集できます。
 
-- `Guide`
-- `Close`
+できること:
 
-### Box Editing
+- 障害物ボックスの追加
+- 障害物ボックスの削除
+- 障害物ボックスの選択
+- ドラッグによる移動
+- 3D ハンドルによる幅、奥行き、高さの調整
+- 障害物の elevation 調整
+- マップサイズの変更
+- ロボットの初期スポーン位置と yaw の設定
 
-- `Select`
-- `Add Obstacle`
-- `Delete Obstacle`
+編集内容はブラウザの `localStorage` に保存され、Viewer と Editor で共有されます。
 
-### Robot / Spawn
+## PLATEAU / 3D Tiles モード
 
-- `Set Spawn`
+`web/tiles.html` では 3D Tiles の `tileset.json` を読み込み、都市モデルを表示できます。
 
-右側パネルでは次を編集できます。
+現在のプリセット:
 
-- マップの幅 / 高さ
-- 追加障害物のデフォルトサイズ
-- 選択中障害物の位置 / サイズ / elevation
-- ロボットの spawn yaw
+- `Shibuya`: `web/data/plateau/shibuya/tileset.json`
+- `Shinjuku`: `web/data/plateau/shinjuku/tileset.json`
+- `Chiyoda`: `web/data/plateau/chiyoda/tileset.json`
+
+使い方:
+
+1. `web/tiles.html` を開く
+2. プルダウンで `Shibuya`、`Shinjuku`、`Chiyoda` のいずれかを選ぶ
+3. `Load Tileset` を押す
+4. `Spawn Robot` を押す
+5. 3D Tiles の床や地面をクリックしてロボットをスポーンする
+6. `WASD` と左右キーでロボットを動かす
+
+右上の `POS` ボタンを押すと、ロボットの現在位置を表示できます。
+
+### データの置き方
+
+3D Tiles は `tileset.json` と、そこから参照される `data/` フォルダなどの相対パスを保ったまま置く必要があります。
+
+例:
+
+```text
+web/data/plateau/shibuya/tileset.json
+web/data/plateau/shibuya/data/...
+```
+
+プリセット以外の 3D Tiles を使う場合は、入力欄に任意の `tileset.json` URL を入れて `Load Tileset` を押します。
+
+## PLATEAUデータについて
+
+PLATEAU の 3D都市モデルはオープンデータとして公開されています。利用時は、配布元のライセンス、出典表記、利用条件を確認してください。
+
+参考:
+
+- PLATEAU: https://www.mlit.go.jp/plateau/
+- G空間情報センター PLATEAUポータル: https://front.geospatial.jp/plateau_portal_site/
+- 3D都市モデル標準製品仕様書・利用ルール: https://www.mlit.go.jp/plateau/libraries/
+
+## 主なファイル
+
+- `web/index.html`: 通常 Viewer の UI
+- `web/viewer.js`: 通常 Viewer のメイン実装
+- `web/viewer-main.js`: 通常 Viewer のエントリーポイント
+- `web/editor.html`: Map Editor の UI
+- `web/editor-main.js`: Map Editor のエントリーポイント
+- `web/tiles.html`: 3D Tiles / PLATEAU Viewer の UI
+- `web/tiles-main.js`: 3D Tiles / PLATEAU Viewer のエントリーポイント
+- `web/tiles-viewer.js`: 3D Tiles 用 Viewer 実装
+- `web/modules/map-state.js`: マップ状態の保存、読み込み
+- `web/modules/path-planners.js`: 経路計画モジュール
+- `web/modules/path-followers.js`: 経路追従モジュール
+- `web/modules/planner-debug-view.js`: 経路計画デバッグビュー
+- `web/assets/go2/`: Go2 関連アセット
+- `web/assets/turtlebot3/`: TurtleBot3 関連アセット
+- `web/data/plateau/`: PLATEAU / 3D Tiles データ配置場所
+- `config/go2_map.json`: 初期マップ設定
+
+## モジュール差し替えについて
+
+このビューアーは、経路計画や経路追従の方式を比較しやすいように、段階的にモジュール分離しています。
+
+現在の主な差し替え対象:
+
+- 経路計画: `web/modules/path-planners.js`
+- 経路追従: `web/modules/path-followers.js`
+- 経路計画の可視化: `web/modules/planner-debug-view.js`
+- マップ状態管理: `web/modules/map-state.js`
+
+### 経路計画モジュールの入出力
+
+入力:
+
+- `start`: 開始点 `{ x, z }`
+- `goal`: 目的地 `{ x, z }`
+- `obstacleBounds`: 障害物の2D境界矩形
+- `mapWidth`: マップ幅
+- `mapHeight`: マップ高さ
+- `clearance`: ロボット半径や安全余白
+
+出力:
+
+- `ok`: 経路生成に成功したか
+- `path`: 折れ線経路 `[{ x, z }, ...]`
+- `smoothPath`: 曲線追従用のサンプル点列
+- `polylineMetrics`: 折れ線経路の距離情報
+- `smoothPathMetrics`: 曲線経路の距離情報
+- `debugData`: 可視化用のノード、エッジ、障害物、安全範囲など
+- `reason`: 失敗理由
+
+この形を守れば、Visibility Graph 以外の planner も比較しやすくなります。
+
+### 経路追従モジュールの考え方
+
+Go2 と TurtleBot3 では移動機構が違うため、同じ経路でも追従方針を変えています。
+
+- Go2: waypoint を順に踏む、直線移動とその場 yaw 回転を分ける
+- TurtleBot3: 曲線経路を滑らかに追従する
+
+今後は、Pure Pursuit、Stanley Control、MPC などを別 follower として追加し、同じマップ、同じ障害物、同じ開始点と目的地で比較する構成にできます。
 
 ## アセット出典
 
 ### Unitree Go2
 
 - 製品ページ: https://www.unitree.com/go2/
-- ROS 記述: https://github.com/unitreerobotics/unitree_ros
-- モデル配布: https://github.com/unitreerobotics/unitree_model
+- Unitree ROS: https://github.com/unitreerobotics/unitree_ros
+- Unitree model: https://github.com/unitreerobotics/unitree_model
 - 出典メモ: `web/assets/go2/ATTRIBUTION.md`
 
 ### TurtleBot3 Burger
 
-- リポジトリ: https://github.com/ROBOTIS-GIT/turtlebot3
-- 参照 URDF: `turtlebot3_description/urdf/turtlebot3_burger.urdf`
+- ROBOTIS TurtleBot3: https://github.com/ROBOTIS-GIT/turtlebot3
+- 参考 URDF: `turtlebot3_description/urdf/turtlebot3_burger.urdf`
 - 出典メモ: `web/assets/turtlebot3/ATTRIBUTION.md`
+
+## 注意
+
+- これは物理シミュレータではなく、ブラウザベースの可視化・検証用ビューアーです。
+- Go2 の歩行表現や TurtleBot3 の見た目は、操作感と検証用途を優先して調整しています。
+- 3D Tiles 上の当たり判定は、読み込まれたタイルのメッシュに対する簡易判定です。
+- PLATEAU の大規模データは重いため、ブラウザやPC性能によって読み込みに時間がかかる場合があります。
+- Viewer、Editor、3D Tiles Viewer は、用途ごとに状態を分けながら段階的に整理しています。
 
 ## 旧スクリプト
 
@@ -333,22 +284,3 @@ python scripts/create_go2_map.py
 出力:
 
 - `output/go2_map.svg`
-
-参照設定:
-
-- `config/go2_map.json`
-
-## 補足
-
-- これは物理シミュレータではなく、ブラウザベースの可視化 / デモ環境です
-- 自律移動や歩容は、見た目と操作感を重視して調整しています
-- Viewer と Editor はブラウザストレージ経由でマップ状態を共有しています
-- 特に TurtleBot3 の STL 見た目合わせは、まだ改善の余地があります
-
-## 今後の改善候補
-
-- TurtleBot3 の見た目位置合わせの改善
-- より本格的な 3D リサイズ gizmo
-- マップの import / export
-- viewer / planner / editor の段階的なモジュール分割
-- ROS 連携の強化

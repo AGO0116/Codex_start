@@ -7,8 +7,10 @@
     <script type="importmap">
       {
         "imports": {
-          "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+          "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+          "three/examples/jsm/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+          "3d-tiles-renderer": "https://esm.sh/3d-tiles-renderer@0.4.18?target=es2022&external=three"
         }
       }
     </script>
@@ -240,6 +242,87 @@
         background: rgba(255, 255, 255, 0.05);
         color: var(--text);
         font: inherit;
+      }
+
+      .tileset-panel {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .tileset-panel.is-hidden {
+        display: none;
+      }
+
+      .tileset-input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        font: inherit;
+        box-sizing: border-box;
+      }
+
+      .tileset-select {
+        width: 100%;
+        margin-top: 0;
+      }
+
+      .position-panel {
+        position: fixed;
+        top: 68px;
+        right: 18px;
+        width: min(280px, calc(100vw - 36px));
+        padding: 14px;
+        border: 1px solid rgba(126, 208, 255, 0.22);
+        border-radius: 18px;
+        background: rgba(8, 14, 24, 0.86);
+        box-shadow: var(--shadow);
+        color: var(--text);
+        z-index: 12;
+        backdrop-filter: blur(14px);
+      }
+
+      .position-float-button {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        z-index: 13;
+        width: auto;
+        min-width: 74px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-align: center;
+      }
+
+      .position-panel.is-hidden {
+        display: none;
+      }
+
+      .position-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .position-value {
+        margin-top: 8px;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .tileset-note {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.35;
       }
 
       code {
@@ -494,11 +577,11 @@
       }
     </style>
   </head>
-  <body>
+  <body data-app-mode="tiles">
     <div id="hud">
-      <div class="eyebrow">Multi Robot Viewer</div>
-      <h1>Robot Nav Viewer</h1>
-      <p>3D viewer and navigation sandbox for legged and wheeled robots.</p>
+      <div class="eyebrow">PLATEAU 3D Tiles</div>
+      <h1>Robot City Viewer</h1>
+      <p>City-scale robot viewer for PLATEAU and other 3D Tiles datasets.</p>
       <div class="specs">
         <div class="spec">
           <span class="spec-label">Platform</span>
@@ -528,6 +611,7 @@
           <div class="planner-actions">
             <button id="camera-mode-btn" type="button" class="action-button"><strong>Camera</strong><span>Follow or free view</span></button>
             <button id="guide-toggle-btn" type="button" class="action-button"><strong>Guide</strong><span>Toggle help with E</span></button>
+            <button id="position-toggle-btn" type="button" class="action-button"><strong>Position</strong><span>Show map location</span></button>
           </div>
         </div>
         <div class="planner-group">
@@ -542,13 +626,42 @@
         <div class="planner-group">
           <div class="planner-group-title">Map</div>
           <div class="planner-actions">
+            <button id="viewer-page-btn" type="button" class="action-button"><strong>Viewer</strong><span>Return to sandbox view</span></button>
             <button id="map-edit-btn" type="button" class="action-button"><strong>Map Edit</strong><span>Open 3D editor</span></button>
-            <button type="button" class="action-button accent-button" onclick="window.location.href='./tiles.html'"><strong>3D City</strong><span>Open PLATEAU viewer</span></button>
+          </div>
+          <div id="tileset-panel" class="tileset-panel">
+            <select id="tileset-preset-select" class="tileset-select">
+              <option value="./data/plateau/shibuya/tileset.json">Shibuya</option>
+              <option value="./data/plateau/shinjuku/tileset.json">Shinjuku</option>
+              <option value="./data/plateau/chiyoda/tileset.json">Chiyoda</option>
+            </select>
+            <input
+              id="tileset-url-input"
+              class="tileset-input"
+              type="text"
+              value="./data/plateau/shibuya/tileset.json"
+              spellcheck="false"
+            />
+            <div class="planner-actions">
+              <button id="tileset-load-btn" type="button" class="action-button"><strong>Load Tileset</strong><span>Read tileset.json</span></button>
+              <button id="tiles-spawn-btn" type="button" class="action-button"><strong>Spawn Robot</strong><span>Click a tile surface</span></button>
+            </div>
+            <div class="tileset-note">
+              Choose a built-in PLATEAU map, or paste any reachable <code>tileset.json</code> URL.
+            </div>
           </div>
         </div>
         <div class="planner-status" data-role="planner-status">Select start and goal points.</div>
       </div>
     </div>
+    <button id="position-float-btn" type="button" class="position-float-button">POS</button>
+    <aside id="position-panel" class="position-panel is-hidden" aria-hidden="true">
+      <div class="position-title">
+        <span>Robot Position</span>
+        <span data-role="position-map">3D Tiles</span>
+      </div>
+      <div class="position-value" data-role="position-detail">Load a tileset and spawn the robot.</div>
+    </aside>
     <aside id="planner-debug" aria-hidden="true">
       <div class="debug-head">
         <h2 class="debug-title">Path Planning</h2>
@@ -607,92 +720,6 @@
         <span>Show or hide this guide</span>
       </div>
     </aside>
-    <section id="editor-screen" aria-hidden="true">
-      <div class="editor-main">
-        <div class="editor-head">
-          <h2 class="editor-title">Map Editor</h2>
-        </div>
-        <p class="editor-note">Select to move. Use the colored handles on the selected box to resize width, depth, and height directly in 3D.</p>
-        <div class="editor-toolbar">
-          <div class="editor-tool-group">
-            <div class="editor-tool-title">Session</div>
-            <div class="editor-tool-grid">
-              <button id="guide-toggle-btn" type="button">E Guide</button>
-              <button id="editor-close-btn" type="button">Close</button>
-            </div>
-          </div>
-          <div class="editor-tool-group">
-            <div class="editor-tool-title">Box Editing</div>
-            <div class="editor-tool-grid">
-              <button id="editor-select-btn" type="button">Select</button>
-              <button id="editor-add-btn" type="button">Add Obstacle</button>
-              <button id="editor-delete-btn" type="button">Delete Obstacle</button>
-            </div>
-          </div>
-          <div class="editor-tool-group">
-            <div class="editor-tool-title">Robot / Spawn</div>
-            <div class="editor-tool-grid">
-              <button id="editor-spawn-btn" type="button">Set Spawn</button>
-            </div>
-          </div>
-        </div>
-        <canvas id="editor-canvas" class="editor-canvas" width="900" height="620"></canvas>
-      </div>
-      <aside class="editor-side">
-        <div class="editor-form">
-          <div class="editor-row">
-            <label>Map Width
-              <input id="editor-map-width" type="number" min="4" max="30" step="0.5" />
-            </label>
-            <label>Map Height
-              <input id="editor-map-height" type="number" min="4" max="30" step="0.5" />
-            </label>
-          </div>
-          <div class="editor-row">
-            <label>Obstacle Width
-              <input id="editor-obstacle-width" type="number" min="0.2" max="6" step="0.1" />
-            </label>
-            <label>Obstacle Depth
-              <input id="editor-obstacle-depth" type="number" min="0.2" max="6" step="0.1" />
-            </label>
-          </div>
-          <div class="editor-row">
-            <label>Obstacle Height
-              <input id="editor-obstacle-height" type="number" min="0.1" max="2" step="0.05" />
-            </label>
-            <label>Spawn Yaw
-              <input id="editor-spawn-yaw" type="number" min="-180" max="180" step="1" />
-            </label>
-          </div>
-          <div class="editor-row">
-            <label>Box X
-              <input id="editor-box-x" type="number" step="0.1" />
-            </label>
-            <label>Box Y
-              <input id="editor-box-y" type="number" step="0.1" />
-            </label>
-          </div>
-          <div class="editor-row">
-            <label>Box Z Height
-              <input id="editor-box-elevation" type="number" min="0" max="4" step="0.05" />
-            </label>
-            <label>Box Height
-              <input id="editor-box-height" type="number" min="0.1" max="4" step="0.05" />
-            </label>
-          </div>
-          <div class="editor-row">
-            <label>Box Width
-              <input id="editor-box-width" type="number" min="0.2" max="6" step="0.1" />
-            </label>
-            <label>Box Depth
-              <input id="editor-box-depth" type="number" min="0.2" max="6" step="0.1" />
-            </label>
-          </div>
-          <button id="editor-apply-btn" type="button">Apply Map Changes</button>
-          <div class="planner-status" data-role="editor-status">Choose a tool and click the map.</div>
-        </div>
-      </aside>
-    </section>
-    <script type="module" src="./viewer.js?v=20260505-camera-guide"></script>
+    <script type="module" src="./tiles-main.js?v=20260506-tiles-presets-position-steps"></script>
   </body>
 </html>

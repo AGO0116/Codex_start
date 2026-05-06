@@ -1,23 +1,31 @@
 import * as THREE from "three";
 import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import {
+  plannerModules,
+  inflateBounds,
+  pointInRect,
+  projectPointOntoPath,
+  samplePathAtProgress,
+} from "./modules/path-planners.js";
+import { followerModules } from "./modules/path-followers.js";
+import {
+  createRuntimeMapState,
+} from "./modules/map-state.js";
+import { drawPlannerDebugView, showPlannerDebugPanel } from "./modules/planner-debug-view.js";
+
+function loadStoredMapState() {
+  return null;
+}
+
+function saveStoredMapState() {
+  // Tiles mode is isolated from the sandbox/editor local map state on purpose.
+}
 
 const defaultConfig = {
   map: { width_m: 10.0, height_m: 8.0 },
   go2_pose: { x_m: 3.5, y_m: 2.0, yaw_deg: 45.0 },
 };
-const mapStorageKey = "robot-nav-viewer.map-state.v1";
-
-const initialObstacles = [
-  { x: 2.0, y: 1.0, w: 3.0, d: 0.3, h: 0.45 },
-  { x: 6.0, y: 3.0, w: 0.4, d: 2.5, h: 0.8 },
-  { x: 1.0, y: 5.5, w: 2.8, d: 0.4, h: 0.55 },
-  { x: 7.4, y: 0.8, w: 0.55, d: 0.6, h: 0.12 },
-  { x: 7.95, y: 0.8, w: 0.55, d: 0.6, h: 0.24 },
-  { x: 8.5, y: 0.8, w: 0.55, d: 0.6, h: 0.36 },
-  { x: 9.05, y: 0.8, w: 0.55, d: 0.6, h: 0.48 },
-];
-
 const urdfBasis = new THREE.Matrix4().set(
   1, 0, 0, 0,
   0, 0, 1, 0,
@@ -102,58 +110,15 @@ const turtlebot3Spec = {
   wheelRadius: 0.033,
   wheelSeparation: 0.16,
 };
-
-function hydrateObstacleList(obstacles, nextIdStart = 1) {
-  let nextId = nextIdStart;
-  const usedIds = new Set();
-  const hydrated = obstacles.map((obstacle) => {
-    let assignedId = Number(obstacle.id);
-    if (!Number.isInteger(assignedId) || usedIds.has(assignedId) || assignedId < 1) {
-      while (usedIds.has(nextId)) {
-        nextId += 1;
-      }
-      assignedId = nextId++;
-    }
-    usedIds.add(assignedId);
-    nextId = Math.max(nextId, assignedId + 1);
-    return {
-      ...obstacle,
-      id: assignedId,
-      elevation: obstacle.elevation ?? 0,
-    };
-  });
-  return {
-    nextId,
-    obstacles: hydrated,
-  };
-}
-
-function loadStoredMapState() {
-  try {
-    const raw = window.localStorage.getItem(mapStorageKey);
-    if (!raw) {
-      return null;
-    }
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function saveStoredMapState(cfg, mapState) {
-  try {
-    window.localStorage.setItem(
-      mapStorageKey,
-      JSON.stringify({
-        map: cfg.map,
-        go2_pose: cfg.go2_pose,
-        obstacles: mapState.obstacles,
-      })
-    );
-  } catch {
-    // Ignore localStorage errors and keep runtime state alive.
-  }
-}
+const tilesetStorageKey = "robot-nav-viewer.tileset-url.v1";
+const plateauPresets = {
+  shibuya: "./data/plateau/shibuya/tileset.json",
+  shinjuku: "./data/plateau/shinjuku/tileset.json",
+  chiyoda: "./data/plateau/chiyoda/tileset.json",
+};
+const wgs84A = 6378137;
+const wgs84F = 1 / 298.257223563;
+const wgs84E2 = wgs84F * (2 - wgs84F);
 
 async function loadConfig() {
   try {
@@ -169,17 +134,6 @@ async function loadConfig() {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
-}
-
-function moveTowards(current, target, maxDelta) {
-  if (Math.abs(target - current) <= maxDelta) {
-    return target;
-  }
-  return current + Math.sign(target - current) * maxDelta;
-}
-
-function shortestAngleDelta(target, current) {
-  return THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI;
 }
 
 function mapToWorld(x, y, widthM, heightM) {
@@ -405,6 +359,122 @@ function loadStlGeometry(loader, url) {
   return new Promise((resolve, reject) => {
     loader.load(url, resolve, undefined, reject);
   });
+}
+
+function makeEcefToLocalFrame(center) {
+  if (center.lengthSq() < 1e-6) {
+    return new THREE.Matrix4();
+  }
+
+  const up = center.clone().normalize();
+  const worldNorth = new THREE.Vector3(0, 0, 1);
+  const worldAlt = new THREE.Vector3(0, 1, 0);
+  const east = new THREE.Vector3().crossVectors(worldNorth, up);
+
+  if (east.lengthSq() < 1e-10) {
+    east.crossVectors(worldAlt, up);
+  }
+  east.normalize();
+
+  const north = new THREE.Vector3().crossVectors(up, east).normalize();
+
+  return new THREE.Matrix4().set(
+    east.x, east.y, east.z, 0,
+    up.x, up.y, up.z, 0,
+    north.x, north.y, north.z, 0,
+    0, 0, 0, 1
+  );
+}
+
+function makeEcefAxes(center) {
+  if (center.lengthSq() < 1e-6) {
+    return {
+      east: new THREE.Vector3(1, 0, 0),
+      up: new THREE.Vector3(0, 1, 0),
+      north: new THREE.Vector3(0, 0, 1),
+    };
+  }
+
+  const up = center.clone().normalize();
+  const worldNorth = new THREE.Vector3(0, 0, 1);
+  const worldAlt = new THREE.Vector3(0, 1, 0);
+  const east = new THREE.Vector3().crossVectors(worldNorth, up);
+  if (east.lengthSq() < 1e-10) {
+    east.crossVectors(worldAlt, up);
+  }
+  east.normalize();
+  const north = new THREE.Vector3().crossVectors(up, east).normalize();
+  return { east, up, north };
+}
+
+function geodeticToEcef(longitude, latitude, height = 0) {
+  const sinLat = Math.sin(latitude);
+  const cosLat = Math.cos(latitude);
+  const sinLon = Math.sin(longitude);
+  const cosLon = Math.cos(longitude);
+  const normal = wgs84A / Math.sqrt(1 - wgs84E2 * sinLat * sinLat);
+
+  return new THREE.Vector3(
+    (normal + height) * cosLat * cosLon,
+    (normal + height) * cosLat * sinLon,
+    (normal * (1 - wgs84E2) + height) * sinLat
+  );
+}
+
+async function loadTilesetRegionFrame(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+    const tileset = await response.json();
+    const region = tileset?.root?.boundingVolume?.region;
+    if (!Array.isArray(region) || region.length < 6) {
+      return null;
+    }
+
+    const [west, south, east, north, minHeight, maxHeight] = region;
+    const centerLongitude = (west + east) * 0.5;
+    const centerLatitude = (south + north) * 0.5;
+    const centerHeight = (minHeight + maxHeight) * 0.5;
+    const center = geodeticToEcef(centerLongitude, centerLatitude, centerHeight);
+    const axes = makeEcefAxes(center);
+    let radius = 1;
+
+    for (const longitude of [west, east]) {
+      for (const latitude of [south, north]) {
+        for (const height of [minHeight, maxHeight]) {
+          const centered = geodeticToEcef(longitude, latitude, height).sub(center);
+          const local = new THREE.Vector3(
+            centered.dot(axes.east),
+            centered.dot(axes.up),
+            centered.dot(axes.north)
+          );
+          radius = Math.max(radius, local.length());
+        }
+      }
+    }
+
+    return { center, radius, ...axes };
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredTilesetUrl() {
+  try {
+    return window.localStorage.getItem(tilesetStorageKey) ?? "./data/plateau/shibuya/tileset.json";
+  } catch {
+    return "./data/plateau/shibuya/tileset.json";
+  }
+}
+
+function saveStoredTilesetUrl(url) {
+  try {
+    window.localStorage.setItem(tilesetStorageKey, url);
+  } catch {
+    // Ignore localStorage errors.
+  }
 }
 
 async function loadTurtlebot3Assets() {
@@ -802,7 +872,8 @@ function placeGo2(root, cfg) {
 
 function createScene(cfg, obstacleList) {
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x05070b, 18, 54);
+  const defaultFog = new THREE.Fog(0x05070b, 18, 54);
+  scene.fog = defaultFog;
 
   const mapGroup = createMapBase(scene, cfg);
   const { obstacleGroup, bounds: obstacleBounds, meshes: obstacleMeshes } = createObstacles(
@@ -822,6 +893,9 @@ function createScene(cfg, obstacleList) {
     mapGroup,
     obstacleGroup,
     obstacleMeshes,
+    tilesRenderer: null,
+    tilesGroupOffset: new THREE.Group(),
+    defaultFog,
   };
 }
 
@@ -956,207 +1030,6 @@ function resolveMotionWithSteps(nextX, nextZ, currentX, currentZ, currentSupport
   };
 }
 
-function inflateBounds(bounds, margin) {
-  return bounds.map((box) => ({
-    minX: box.minX - margin,
-    maxX: box.maxX + margin,
-    minZ: box.minZ - margin,
-    maxZ: box.maxZ + margin,
-  }));
-}
-
-function pointInRect(point, rect) {
-  return (
-    point.x > rect.minX &&
-    point.x < rect.maxX &&
-    point.z > rect.minZ &&
-    point.z < rect.maxZ
-  );
-}
-
-function orientation(a, b, c) {
-  return (b.z - a.z) * (c.x - b.x) - (b.x - a.x) * (c.z - b.z);
-}
-
-function onSegment(a, b, c) {
-  return (
-    Math.min(a.x, c.x) <= b.x + 1e-6 &&
-    b.x <= Math.max(a.x, c.x) + 1e-6 &&
-    Math.min(a.z, c.z) <= b.z + 1e-6 &&
-    b.z <= Math.max(a.z, c.z) + 1e-6
-  );
-}
-
-function segmentsIntersect(p1, q1, p2, q2) {
-  const o1 = orientation(p1, q1, p2);
-  const o2 = orientation(p1, q1, q2);
-  const o3 = orientation(p2, q2, p1);
-  const o4 = orientation(p2, q2, q1);
-
-  if ((o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0)) {
-    return true;
-  }
-
-  if (Math.abs(o1) < 1e-6 && onSegment(p1, p2, q1)) return true;
-  if (Math.abs(o2) < 1e-6 && onSegment(p1, q2, q1)) return true;
-  if (Math.abs(o3) < 1e-6 && onSegment(p2, p1, q2)) return true;
-  if (Math.abs(o4) < 1e-6 && onSegment(p2, q1, q2)) return true;
-
-  return false;
-}
-
-function segmentCrossesRect(a, b, rect) {
-  if (pointInRect(a, rect) || pointInRect(b, rect)) {
-    return true;
-  }
-
-  const corners = [
-    { x: rect.minX, z: rect.minZ },
-    { x: rect.maxX, z: rect.minZ },
-    { x: rect.maxX, z: rect.maxZ },
-    { x: rect.minX, z: rect.maxZ },
-  ];
-
-  for (let index = 0; index < corners.length; index += 1) {
-    const c1 = corners[index];
-    const c2 = corners[(index + 1) % corners.length];
-    if (segmentsIntersect(a, b, c1, c2)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasLineOfSight(a, b, inflatedBounds) {
-  for (const rect of inflatedBounds) {
-    if (segmentCrossesRect(a, b, rect)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function makeNodeKey(point) {
-  return `${point.x.toFixed(4)}:${point.z.toFixed(4)}`;
-}
-
-function buildVisibilityGraph(start, goal, inflatedBounds, mapWidth, mapHeight) {
-  const margin = 0.04;
-  const nodes = [start, goal];
-
-  for (const rect of inflatedBounds) {
-    const corners = [
-      { x: rect.minX - margin, z: rect.minZ - margin },
-      { x: rect.maxX + margin, z: rect.minZ - margin },
-      { x: rect.maxX + margin, z: rect.maxZ + margin },
-      { x: rect.minX - margin, z: rect.maxZ + margin },
-    ];
-
-    for (const corner of corners) {
-      if (
-        corner.x <= -mapWidth / 2 + margin ||
-        corner.x >= mapWidth / 2 - margin ||
-        corner.z <= -mapHeight / 2 + margin ||
-        corner.z >= mapHeight / 2 - margin
-      ) {
-        continue;
-      }
-      if (!inflatedBounds.some((rectTest) => pointInRect(corner, rectTest))) {
-        nodes.push(corner);
-      }
-    }
-  }
-
-  const deduped = [];
-  const seen = new Set();
-  for (const node of nodes) {
-    const key = makeNodeKey(node);
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(node);
-    }
-  }
-
-  const graph = deduped.map(() => []);
-  for (let i = 0; i < deduped.length; i += 1) {
-    for (let j = i + 1; j < deduped.length; j += 1) {
-      if (!hasLineOfSight(deduped[i], deduped[j], inflatedBounds)) {
-        continue;
-      }
-      const dx = deduped[i].x - deduped[j].x;
-      const dz = deduped[i].z - deduped[j].z;
-      const distance = Math.hypot(dx, dz);
-      graph[i].push({ to: j, cost: distance });
-      graph[j].push({ to: i, cost: distance });
-    }
-  }
-
-  return { nodes: deduped, graph };
-}
-
-function dijkstraShortestPath(nodes, graph, startIndex, goalIndex) {
-  const dist = nodes.map(() => Number.POSITIVE_INFINITY);
-  const prev = nodes.map(() => -1);
-  const visited = nodes.map(() => false);
-  dist[startIndex] = 0;
-
-  for (let count = 0; count < nodes.length; count += 1) {
-    let current = -1;
-    let best = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < nodes.length; i += 1) {
-      if (!visited[i] && dist[i] < best) {
-        best = dist[i];
-        current = i;
-      }
-    }
-
-    if (current === -1 || current === goalIndex) {
-      break;
-    }
-
-    visited[current] = true;
-    for (const edge of graph[current]) {
-      const alt = dist[current] + edge.cost;
-      if (alt < dist[edge.to]) {
-        dist[edge.to] = alt;
-        prev[edge.to] = current;
-      }
-    }
-  }
-
-  if (!Number.isFinite(dist[goalIndex])) {
-    return null;
-  }
-
-  const path = [];
-  for (let cursor = goalIndex; cursor !== -1; cursor = prev[cursor]) {
-    path.push(nodes[cursor]);
-  }
-  path.reverse();
-  return path;
-}
-
-function prunePath(path, inflatedBounds) {
-  if (!path || path.length <= 2) {
-    return path;
-  }
-
-  const pruned = [path[0]];
-  let anchor = 0;
-
-  while (anchor < path.length - 1) {
-    let next = path.length - 1;
-    while (next > anchor + 1 && !hasLineOfSight(path[anchor], path[next], inflatedBounds)) {
-      next -= 1;
-    }
-    pruned.push(path[next]);
-    anchor = next;
-  }
-
-  return pruned;
-}
-
 function createMarker(color, radius, height) {
   const mesh = new THREE.Mesh(
     new THREE.CylinderGeometry(radius, radius, height, 24),
@@ -1215,269 +1088,10 @@ function buildPathRenderables(path, robotType) {
   return group;
 }
 
-function buildSmoothPath(path) {
-  if (!path || path.length < 2) {
-    return path;
-  }
-
-  if (path.length < 3) {
-    return path.map((point) => ({ x: point.x, z: point.z }));
-  }
-
-  const curve = new THREE.CatmullRomCurve3(
-    path.map((point) => pointToVector(point, 0)),
-    false,
-    "centripetal",
-    0.15
-  );
-
-  return curve.getPoints(Math.max(32, path.length * 18)).map((point) => ({
-    x: point.x,
-    z: point.z,
-  }));
-}
-
-function computePathMetrics(path) {
-  const cumulative = [0];
-  for (let index = 1; index < path.length; index += 1) {
-    const prev = path[index - 1];
-    const current = path[index];
-    cumulative.push(cumulative[index - 1] + Math.hypot(current.x - prev.x, current.z - prev.z));
-  }
-  return {
-    cumulative,
-    totalLength: cumulative[cumulative.length - 1] ?? 0,
-  };
-}
-
-function closestPointOnSegment(point, a, b) {
-  const abX = b.x - a.x;
-  const abZ = b.z - a.z;
-  const abLenSq = abX * abX + abZ * abZ;
-  if (abLenSq < 1e-8) {
-    return { point: a, t: 0, distance: Math.hypot(point.x - a.x, point.z - a.z) };
-  }
-
-  const apX = point.x - a.x;
-  const apZ = point.z - a.z;
-  const t = clamp((apX * abX + apZ * abZ) / abLenSq, 0, 1);
-  const proj = { x: a.x + abX * t, z: a.z + abZ * t };
-  return { point: proj, t, distance: Math.hypot(point.x - proj.x, point.z - proj.z) };
-}
-
-function projectPointOntoPath(point, path, metrics) {
-  let best = {
-    progress: 0,
-    point: path[0],
-    distance: Number.POSITIVE_INFINITY,
-    segmentIndex: 0,
-  };
-
-  for (let index = 0; index < path.length - 1; index += 1) {
-    const result = closestPointOnSegment(point, path[index], path[index + 1]);
-    if (result.distance < best.distance) {
-      const segmentLength = metrics.cumulative[index + 1] - metrics.cumulative[index];
-      best = {
-        progress: metrics.cumulative[index] + segmentLength * result.t,
-        point: result.point,
-        distance: result.distance,
-        segmentIndex: index,
-      };
-    }
-  }
-
-  return best;
-}
-
-function samplePathAtProgress(path, metrics, progress) {
-  if (progress <= 0) {
-    return path[0];
-  }
-  if (progress >= metrics.totalLength) {
-    return path[path.length - 1];
-  }
-
-  for (let index = 0; index < metrics.cumulative.length - 1; index += 1) {
-    const startProgress = metrics.cumulative[index];
-    const endProgress = metrics.cumulative[index + 1];
-    if (progress <= endProgress) {
-      const span = endProgress - startProgress;
-      const t = span > 1e-8 ? (progress - startProgress) / span : 0;
-      return {
-        x: THREE.MathUtils.lerp(path[index].x, path[index + 1].x, t),
-        z: THREE.MathUtils.lerp(path[index].z, path[index + 1].z, t),
-      };
-    }
-  }
-
-  return path[path.length - 1];
-}
-
-function showPlannerDebugPanel(visible) {
-  const panel = document.getElementById("planner-debug");
-  if (!panel) {
-    return;
-  }
-  panel.classList.toggle("is-visible", visible);
-  panel.setAttribute("aria-hidden", visible ? "false" : "true");
-}
-
-function drawPlannerDebugView(debugData, cfg, robotLabel) {
-  const canvas = document.getElementById("planner-debug-canvas");
-  if (!canvas || !debugData) {
-    return;
-  }
-
-  const ctx = canvas.getContext("2d");
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#07101a";
-  ctx.fillRect(0, 0, width, height);
-
-  const pad = 14;
-  const scale = Math.min(
-    (width - pad * 2) / cfg.map.width_m,
-    (height - pad * 2) / cfg.map.height_m
-  );
-  const mapLeft = pad;
-  const mapTop = pad;
-
-  function toCanvas(point) {
-    return {
-      x: mapLeft + (cfg.map.width_m / 2 - point.x) * scale,
-      y: mapTop + (cfg.map.height_m / 2 - point.z) * scale,
-    };
-  }
-
-  ctx.strokeStyle = "rgba(126, 208, 255, 0.18)";
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= cfg.map.width_m; x += 1) {
-    const canvasX = mapLeft + x * scale;
-    ctx.beginPath();
-    ctx.moveTo(canvasX, mapTop);
-    ctx.lineTo(canvasX, mapTop + cfg.map.height_m * scale);
-    ctx.stroke();
-  }
-  for (let z = 0; z <= cfg.map.height_m; z += 1) {
-    const canvasY = mapTop + z * scale;
-    ctx.beginPath();
-    ctx.moveTo(mapLeft, canvasY);
-    ctx.lineTo(mapLeft + cfg.map.width_m * scale, canvasY);
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = "rgba(255, 122, 26, 0.18)";
-  for (const rect of debugData.inflatedBounds) {
-    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
-    const rectWidth = (rect.maxX - rect.minX) * scale;
-    const rectHeight = (rect.maxZ - rect.minZ) * scale;
-    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
-  }
-
-  ctx.fillStyle = "rgba(159, 215, 255, 0.35)";
-  for (const rect of debugData.obstacleBounds) {
-    const p1 = toCanvas({ x: rect.maxX, z: rect.maxZ });
-    const rectWidth = (rect.maxX - rect.minX) * scale;
-    const rectHeight = (rect.maxZ - rect.minZ) * scale;
-    ctx.fillRect(p1.x, p1.y, rectWidth, rectHeight);
-  }
-
-  ctx.strokeStyle = "rgba(141, 152, 170, 0.26)";
-  ctx.lineWidth = 1;
-  for (let index = 0; index < debugData.graph.length; index += 1) {
-    const from = toCanvas(debugData.nodes[index]);
-    for (const edge of debugData.graph[index]) {
-      if (edge.to <= index) {
-        continue;
-      }
-      const to = toCanvas(debugData.nodes[edge.to]);
-      ctx.beginPath();
-      ctx.moveTo(from.x, from.y);
-      ctx.lineTo(to.x, to.y);
-      ctx.stroke();
-    }
-  }
-
-  if (debugData.rawPath && debugData.rawPath.length >= 2) {
-    ctx.strokeStyle = "rgba(255, 122, 26, 0.68)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    debugData.rawPath.forEach((point, index) => {
-      const p = toCanvas(point);
-      if (index === 0) {
-        ctx.moveTo(p.x, p.y);
-      } else {
-        ctx.lineTo(p.x, p.y);
-      }
-    });
-    ctx.stroke();
-  }
-
-  if (debugData.path && debugData.path.length >= 2) {
-    ctx.strokeStyle = robotLabel.includes("TurtleBot3") ? "#ffb176" : "#1d8f4d";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    debugData.path.forEach((point, index) => {
-      const p = toCanvas(point);
-      if (index === 0) {
-        ctx.moveTo(p.x, p.y);
-      } else {
-        ctx.lineTo(p.x, p.y);
-      }
-    });
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = "#4de18b";
-  const start = toCanvas(debugData.start);
-  ctx.beginPath();
-  ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#ff7a7a";
-  const goal = toCanvas(debugData.goal);
-  ctx.beginPath();
-  ctx.arc(goal.x, goal.y, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#d8e0eb";
-  for (const node of debugData.nodes) {
-    const p = toCanvas(node);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  const edgeCount = debugData.graph.reduce((sum, edges) => sum + edges.length, 0) / 2;
-  document.querySelector('[data-role="debug-robot"]').textContent = robotLabel;
-  document.querySelector('[data-role="debug-nodes"]').textContent = String(debugData.nodes.length);
-  document.querySelector('[data-role="debug-edges"]').textContent = String(edgeCount);
-  document.querySelector('[data-role="debug-raw"]').textContent = String(debugData.rawPath?.length ?? 0);
-  document.querySelector('[data-role="debug-final"]').textContent = String(debugData.path?.length ?? 0);
-  showPlannerDebugPanel(true);
-}
-
-async function main() {
+export async function main(appModeOverride) {
   const cfg = await loadConfig();
-  const appMode = document.body.dataset.appMode ?? "viewer";
+  const appMode = appModeOverride ?? document.body.dataset.appMode ?? "viewer";
   const storedMapState = loadStoredMapState();
-  if (storedMapState?.map) {
-    cfg.map = {
-      width_m: Number(storedMapState.map.width_m ?? cfg.map.width_m),
-      height_m: Number(storedMapState.map.height_m ?? cfg.map.height_m),
-    };
-  }
-  if (storedMapState?.go2_pose) {
-    cfg.go2_pose = {
-      x_m: Number(storedMapState.go2_pose.x_m ?? cfg.go2_pose.x_m),
-      y_m: Number(storedMapState.go2_pose.y_m ?? cfg.go2_pose.y_m),
-      yaw_deg: Number(storedMapState.go2_pose.yaw_deg ?? cfg.go2_pose.yaw_deg),
-    };
-  }
-  cfg.go2_pose.x_m = clamp(cfg.go2_pose.x_m, 0, cfg.map.width_m);
-  cfg.go2_pose.y_m = clamp(cfg.go2_pose.y_m, 0, cfg.map.height_m);
-  cfg.go2_pose.yaw_deg = clamp(cfg.go2_pose.yaw_deg, -180, 180);
   updateLoadingState("Loading official Go2 assets...");
 
   let go2Assets = null;
@@ -1496,13 +1110,22 @@ async function main() {
     180
   );
 
-  const hydratedObstacles = hydrateObstacleList(storedMapState?.obstacles ?? initialObstacles);
-  const mapState = {
-    nextObstacleId: hydratedObstacles.nextId,
-    obstacles: hydratedObstacles.obstacles,
-  };
+  const mapState = createRuntimeMapState(storedMapState);
   saveStoredMapState(cfg, mapState);
   const sceneRefs = createScene(cfg, mapState.obstacles);
+  const modeState = {
+    mapMode: "sandbox",
+    tilesetUrl: loadStoredTilesetUrl(),
+    tilesetLoaded: false,
+    tilesetPanelOpen: appMode === "tiles",
+    tileCollisionMeshes: new Set(),
+    tilesSpawned: false,
+    tilesSpawnArmed: false,
+    positionPanelOpen: false,
+    tilesFrame: null,
+    tilesRobotAnchorLocal: null,
+    tilesRobotAnchorWorld: null,
+  };
   const { scene, scanRing } = sceneRefs;
   const go2Rig = createGo2Model(go2Assets);
   const turtlebot3Rig = createTurtlebot3Model(turtlebot3Assets);
@@ -1511,6 +1134,8 @@ async function main() {
   scene.add(go2Rig.root);
   scene.add(turtlebot3Rig.root);
   updateHud(cfg);
+  let tilesSpawnRequest = null;
+  let tilesRefreshFrames = 0;
 
   const inputState = {
     forward: false,
@@ -1533,6 +1158,17 @@ async function main() {
     isGrounded: true,
     yaw: go2Rig.root.rotation.y,
   };
+  const sandboxMotionState = { ...motionState };
+  const tilesMotionState = {
+    x: 0,
+    z: 0,
+    groundOffset: 0,
+    supportY: 0,
+    jumpY: 0,
+    velocityY: 0,
+    isGrounded: true,
+    yaw: go2Rig.root.rotation.y,
+  };
   const walkSpeed = 2.15;
   const sprintSpeed = 3.45;
   const sneakSpeed = 1.35;
@@ -1543,6 +1179,7 @@ async function main() {
   const stepHeight = 0.18;
   const jumpStepBonus = 0.18;
   const autoNavSpeed = 1.2;
+  const tilesStepHeight = 0.68;
   const robots = {
     go2: {
       type: "go2",
@@ -1577,10 +1214,17 @@ async function main() {
   const upAxis = new THREE.Vector3(0, 1, 0);
   const cameraForward = new THREE.Vector3();
   const cameraRight = new THREE.Vector3();
+  const cameraScreenUp = new THREE.Vector3();
+  const robotForwardWorld = new THREE.Vector3();
+  const robotRightWorld = new THREE.Vector3();
   const raycaster = new THREE.Raycaster();
+  const tilesFloorRaycaster = new THREE.Raycaster();
+  const tilesWallRaycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const planeHit = new THREE.Vector3();
+  const tilesRayOrigin = new THREE.Vector3();
+  const tilesRayDirection = new THREE.Vector3();
   const orbitState = {
     azimuth: Math.PI,
     polar: 0.92,
@@ -1593,9 +1237,25 @@ async function main() {
     lastY: 0,
     panPlaneY: 0,
     panAnchor: new THREE.Vector3(),
+    panRight: new THREE.Vector3(),
+    panUp: new THREE.Vector3(),
   };
   const cameraState = {
     mode: appMode === "editor" ? "free" : "follow",
+  };
+  const sandboxViewState = {
+    cameraMode: appMode === "editor" ? "free" : "follow",
+    azimuth: Math.PI,
+    polar: 0.92,
+    distance: 3.5,
+    target: new THREE.Vector3(0, 0.3, 0),
+  };
+  const tilesViewState = {
+    cameraMode: "free",
+    azimuth: Math.PI * 0.72,
+    polar: 1.02,
+    distance: 80,
+    target: new THREE.Vector3(0, 0, 0),
   };
   const guideState = {
     visible: true,
@@ -1607,6 +1267,7 @@ async function main() {
     speed: 0,
   };
   const plannerState = {
+    plannerKey: "visibilityGraph",
     mode: null,
     start: null,
     goal: null,
@@ -1616,11 +1277,8 @@ async function main() {
     smoothPathMetrics: null,
     debugData: null,
     autoActive: false,
-    pathProgress: 0,
-    autoSegmentIndex: 1,
-    autoSegmentPhase: "align",
-    autoEntryPoint: null,
-    autoEntryTargetIndex: 1,
+    followerKey: null,
+    followerState: null,
   };
   const editorState = {
     isOpen: false,
@@ -1654,11 +1312,121 @@ async function main() {
   scene.add(routeGroup);
   scene.add(selectionOverlayGroup);
 
+  function copyMotionState(target, source) {
+    target.x = source.x;
+    target.z = source.z;
+    target.groundOffset = source.groundOffset;
+    target.supportY = source.supportY;
+    target.jumpY = source.jumpY;
+    target.velocityY = source.velocityY;
+    target.isGrounded = source.isGrounded;
+    target.yaw = source.yaw;
+  }
+
+  function saveCurrentViewState(mode) {
+    const store = mode === "tiles3d" ? tilesViewState : sandboxViewState;
+    store.cameraMode = cameraState.mode;
+    store.azimuth = orbitState.azimuth;
+    store.polar = orbitState.polar;
+    store.distance = orbitState.distance;
+    store.target.copy(orbitState.target);
+  }
+
+  function loadViewState(mode) {
+    const store = mode === "tiles3d" ? tilesViewState : sandboxViewState;
+    cameraState.mode = store.cameraMode;
+    orbitState.azimuth = store.azimuth;
+    orbitState.polar = store.polar;
+    orbitState.distance = store.distance;
+    orbitState.target.copy(store.target);
+    clampOrbitTarget();
+    syncCameraModeButton();
+  }
+
+  function saveCurrentModeMotionState() {
+    copyMotionState(modeState.mapMode === "tiles3d" ? tilesMotionState : sandboxMotionState, motionState);
+  }
+
+  function loadModeMotionState(mode) {
+    copyMotionState(motionState, mode === "tiles3d" ? tilesMotionState : sandboxMotionState);
+    motionState.groundOffset = activeRobot.groundOffset;
+    syncActiveRobotTransform();
+  }
+
+  function getTilesUpAxis() {
+    return modeState.tilesFrame?.up ?? upAxis;
+  }
+
+  function getCurrentUpAxis() {
+    return modeState.mapMode === "tiles3d" ? getTilesUpAxis() : upAxis;
+  }
+
+  function focusOrbitTargetOnRobot(offset = 0.4) {
+    orbitState.target.copy(activeRobot.root.position).addScaledVector(getCurrentUpAxis(), offset);
+    clampOrbitTarget();
+    saveCurrentViewState(modeState.mapMode);
+  }
+
+  function tilesLocalToWorld(x, y, z, target = new THREE.Vector3()) {
+    if (!modeState.tilesFrame) {
+      return target.set(x, y, z);
+    }
+
+    target.copy(modeState.tilesFrame.origin ?? new THREE.Vector3());
+    target.addScaledVector(modeState.tilesFrame.east, x);
+    target.addScaledVector(modeState.tilesFrame.up, y);
+    target.addScaledVector(modeState.tilesFrame.north, z);
+    return target;
+  }
+
+  function tilesAnchoredLocalToWorld(x, y, z, target = new THREE.Vector3()) {
+    if (!modeState.tilesFrame || !modeState.tilesRobotAnchorLocal || !modeState.tilesRobotAnchorWorld) {
+      return tilesLocalToWorld(x, y, z, target);
+    }
+
+    const anchorLocal = modeState.tilesRobotAnchorLocal;
+    target.copy(modeState.tilesRobotAnchorWorld);
+    target.addScaledVector(modeState.tilesFrame.east, x - anchorLocal.x);
+    target.addScaledVector(modeState.tilesFrame.up, y - anchorLocal.y);
+    target.addScaledVector(modeState.tilesFrame.north, z - anchorLocal.z);
+    return target;
+  }
+
+  function worldToTilesLocal(point, target = new THREE.Vector3()) {
+    if (!modeState.tilesFrame) {
+      return target.copy(point);
+    }
+
+    const centered = point.clone().sub(modeState.tilesFrame.origin ?? new THREE.Vector3());
+    target.set(
+      centered.dot(modeState.tilesFrame.east),
+      centered.dot(modeState.tilesFrame.up),
+      centered.dot(modeState.tilesFrame.north)
+    );
+    return target;
+  }
+
   function syncActiveRobotTransform() {
     for (const robot of Object.values(robots)) {
+      if (modeState.mapMode === "tiles3d" && !modeState.tilesSpawned) {
+        robot.root.visible = false;
+        continue;
+      }
       robot.root.visible = robot === activeRobot;
-      robot.root.position.set(motionState.x, motionState.groundOffset + motionState.supportY + motionState.jumpY, motionState.z);
-      robot.root.rotation.y = motionState.yaw;
+      if (modeState.mapMode === "tiles3d" && modeState.tilesFrame) {
+        tilesAnchoredLocalToWorld(
+          motionState.x,
+          motionState.groundOffset + motionState.supportY + motionState.jumpY,
+          motionState.z,
+          robot.root.position
+        );
+        const alignQuat = new THREE.Quaternion().setFromUnitVectors(upAxis, modeState.tilesFrame.up);
+        const yawQuat = new THREE.Quaternion().setFromAxisAngle(modeState.tilesFrame.up, motionState.yaw);
+        robot.root.quaternion.copy(yawQuat).multiply(alignQuat);
+      } else {
+        robot.root.position.set(motionState.x, motionState.groundOffset + motionState.supportY + motionState.jumpY, motionState.z);
+        robot.root.rotation.set(0, motionState.yaw, 0);
+      }
     }
   }
 
@@ -1682,6 +1450,9 @@ async function main() {
       }
     }
     updateHud(cfg, activeRobot.label);
+    if (modeState.mapMode === "tiles3d") {
+      updateLoadingState(`${activeRobot.label} + 3D Tiles View`);
+    }
     updatePlannerStatus(`${activeRobot.label} selected.`);
   }
 
@@ -1733,6 +1504,7 @@ async function main() {
     sceneRefs.obstacleMeshes = obstacleResult.meshes;
     halfWidth = cfg.map.width_m / 2 - 0.4;
     halfHeight = cfg.map.height_m / 2 - 0.4;
+    syncMapModeSceneVisibility();
     rebuildSelectionOverlay();
   }
 
@@ -1742,12 +1514,592 @@ async function main() {
     plannerState.smoothPath = null;
     plannerState.smoothPathMetrics = null;
     plannerState.debugData = null;
-    plannerState.autoSegmentPhase = "align";
-    plannerState.autoEntryPoint = null;
-    plannerState.autoEntryTargetIndex = 1;
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     clearRouteRender();
     showPlannerDebugPanel(false);
     stopAutoNav();
+  }
+
+  function syncTilesetControls() {
+    const tilesetInput = document.getElementById("tileset-url-input");
+    if (tilesetInput && tilesetInput !== document.activeElement) {
+      tilesetInput.value = modeState.tilesetUrl;
+    }
+
+    const presetSelect = document.getElementById("tileset-preset-select");
+    if (presetSelect && presetSelect !== document.activeElement) {
+      const presetEntry = Object.entries(plateauPresets).find(([, url]) => url === modeState.tilesetUrl);
+      presetSelect.value = presetEntry?.[1] ?? "";
+    }
+
+    const panel = document.getElementById("tileset-panel");
+    if (panel) {
+      panel.classList.toggle("is-hidden", appMode === "tiles" ? false : !modeState.tilesetPanelOpen);
+    }
+
+    setButtonActive("tiles-mode-btn", modeState.tilesetPanelOpen);
+    setButtonActive("tileset-sandbox-btn", modeState.mapMode === "sandbox");
+    setButtonActive("tiles-spawn-btn", modeState.tilesSpawnArmed);
+    setButtonActive("position-toggle-btn", modeState.positionPanelOpen);
+    setButtonActive("position-float-btn", modeState.positionPanelOpen);
+    setButtonActive("map-edit-btn", false);
+    setButtonActive("viewer-page-btn", false);
+    const spawnButton = document.getElementById("tiles-spawn-btn");
+    if (spawnButton) {
+      spawnButton.innerHTML = modeState.tilesSpawnArmed
+        ? "<strong>Spawn Armed</strong><span>Click the target tile</span>"
+        : "<strong>Spawn Robot</strong><span>Click a tile surface</span>";
+    }
+  }
+
+  function syncPositionPanel() {
+    const panel = document.getElementById("position-panel");
+    if (!panel) {
+      return;
+    }
+    panel.classList.toggle("is-hidden", !modeState.positionPanelOpen);
+    panel.setAttribute("aria-hidden", modeState.positionPanelOpen ? "false" : "true");
+    const detail = panel.querySelector('[data-role="position-detail"]');
+    const mapLabel = panel.querySelector('[data-role="position-map"]');
+    if (mapLabel) {
+      const presetName = Object.entries(plateauPresets).find(([, url]) => url === modeState.tilesetUrl)?.[0];
+      mapLabel.textContent = presetName ? presetName.toUpperCase() : "Custom";
+    }
+    if (!detail) {
+      return;
+    }
+    if (modeState.mapMode === "tiles3d" && !modeState.tilesSpawned) {
+      detail.textContent = "Robot is not spawned. Press Spawn Robot, then click a tile.";
+      return;
+    }
+    detail.textContent = `local x ${motionState.x.toFixed(2)} / z ${motionState.z.toFixed(2)} / floor ${motionState.supportY.toFixed(2)} / yaw ${Math.round((-motionState.yaw * 180) / Math.PI)}deg`;
+  }
+
+  function syncMapModeSceneVisibility() {
+    const sandboxVisible = modeState.mapMode === "sandbox";
+    if (sceneRefs.mapGroup) {
+      sceneRefs.mapGroup.visible = sandboxVisible;
+    }
+    if (sceneRefs.obstacleGroup) {
+      sceneRefs.obstacleGroup.visible = sandboxVisible;
+    }
+    if (sceneRefs.tilesGroupOffset) {
+      sceneRefs.tilesGroupOffset.visible = modeState.mapMode === "tiles3d";
+    }
+    scene.fog = sandboxVisible ? sceneRefs.defaultFog : null;
+  }
+
+  function updateTilesWorldMatrices() {
+    sceneRefs.tilesGroupOffset?.updateMatrixWorld(true);
+    scene.updateMatrixWorld(true);
+  }
+
+  function getTileCollisionMeshList() {
+    updateTilesWorldMatrices();
+    return [...modeState.tileCollisionMeshes].filter((mesh) => mesh.parent);
+  }
+
+  function getHitWorldNormalY(hit) {
+    if (!hit.face) {
+      return 0;
+    }
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+    return hit.face.normal.clone().applyMatrix3(normalMatrix).normalize().y;
+  }
+
+  function getHitNormalDotUp(hit) {
+    if (!hit.face) {
+      return 0;
+    }
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+    const worldNormal = hit.face.normal.clone().applyMatrix3(normalMatrix).normalize();
+    return worldNormal.dot(getTilesUpAxis());
+  }
+
+  function findTilesSupportY(x, z, fallbackY = 0) {
+    const meshes = getTileCollisionMeshList();
+    if (meshes.length === 0) {
+      return null;
+    }
+
+    tilesAnchoredLocalToWorld(x, fallbackY + 120, z, tilesRayOrigin);
+    tilesRayDirection.copy(getTilesUpAxis()).multiplyScalar(-1);
+    tilesFloorRaycaster.set(tilesRayOrigin, tilesRayDirection);
+    tilesFloorRaycaster.far = 260;
+    const hits = tilesFloorRaycaster.intersectObjects(meshes, false);
+    const floorHits = hits
+      .map((hit) => ({ hit, local: worldToTilesLocal(hit.point.clone()) }))
+      .filter(({ hit, local }) => getHitNormalDotUp(hit) > 0.38 && local.y <= fallbackY + 1.2)
+      .sort((a, b) => b.local.y - a.local.y);
+    return floorHits.length > 0 ? floorHits[0].local.y : null;
+  }
+
+  function findTilesSpawnSurface() {
+    const meshes = getTileCollisionMeshList();
+    if (meshes.length === 0) {
+      return {
+        local: new THREE.Vector3(0, 0, 0),
+        world: new THREE.Vector3(0, 0, 0),
+      };
+    }
+    const worldBounds = new THREE.Box3();
+    for (const mesh of meshes) {
+      worldBounds.expandByObject(mesh);
+    }
+    if (worldBounds.isEmpty()) {
+      return {
+        local: new THREE.Vector3(0, 0, 0),
+        world: new THREE.Vector3(0, 0, 0),
+      };
+    }
+    const centerWorldX = (worldBounds.min.x + worldBounds.max.x) * 0.5;
+    const centerWorldZ = (worldBounds.min.z + worldBounds.max.z) * 0.5;
+    const sampleCols = 15;
+    const sampleRows = 15;
+    const startY = worldBounds.max.y + 120;
+    let bestHit = null;
+    let bestScore = Infinity;
+
+    for (let ix = 0; ix < sampleCols; ix += 1) {
+      for (let iz = 0; iz < sampleRows; iz += 1) {
+        const tx = sampleCols === 1 ? 0.5 : ix / (sampleCols - 1);
+        const tz = sampleRows === 1 ? 0.5 : iz / (sampleRows - 1);
+        const worldX = THREE.MathUtils.lerp(worldBounds.min.x, worldBounds.max.x, tx);
+        const worldZ = THREE.MathUtils.lerp(worldBounds.min.z, worldBounds.max.z, tz);
+        tilesRayOrigin.set(worldX, startY, worldZ);
+        tilesRayDirection.copy(getTilesUpAxis()).multiplyScalar(-1);
+        tilesFloorRaycaster.set(tilesRayOrigin, tilesRayDirection);
+        tilesFloorRaycaster.far = Math.max(300, worldBounds.max.y - worldBounds.min.y + 260);
+        const hits = tilesFloorRaycaster.intersectObjects(meshes, false);
+        const floorHit = hits
+          .map((hit) => ({ hit, local: worldToTilesLocal(hit.point.clone()), world: hit.point.clone() }))
+          .filter(({ hit }) => getHitNormalDotUp(hit) > 0.55)
+          [0];
+        if (!floorHit) {
+          continue;
+        }
+
+        const dx = floorHit.hit.point.x - centerWorldX;
+        const dz = floorHit.hit.point.z - centerWorldZ;
+        const score = dx * dx + dz * dz;
+        if (score < bestScore) {
+          bestScore = score;
+          bestHit = {
+            local: floorHit.local.clone(),
+            world: floorHit.world.clone(),
+          };
+        }
+      }
+    }
+
+    if (bestHit) {
+      return bestHit;
+    }
+
+    const world = new THREE.Vector3(centerWorldX, worldBounds.min.y, centerWorldZ);
+    return {
+      local: worldToTilesLocal(world.clone()),
+      world,
+    };
+  }
+
+  function findTilesSpawnFromVisibleBounds() {
+    const meshes = getTileCollisionMeshList();
+    if (meshes.length === 0) {
+      return null;
+    }
+
+    const worldBounds = new THREE.Box3();
+    for (const mesh of meshes) {
+      worldBounds.expandByObject(mesh);
+    }
+    if (worldBounds.isEmpty()) {
+      return null;
+    }
+
+    const centerX = (worldBounds.min.x + worldBounds.max.x) * 0.5;
+    const centerZ = (worldBounds.min.z + worldBounds.max.z) * 0.5;
+    tilesRayOrigin.set(centerX, worldBounds.max.y + 120, centerZ);
+    tilesRayDirection.copy(getTilesUpAxis()).multiplyScalar(-1);
+    tilesFloorRaycaster.set(tilesRayOrigin, tilesRayDirection);
+    tilesFloorRaycaster.far = Math.max(300, worldBounds.max.y - worldBounds.min.y + 260);
+    const hits = tilesFloorRaycaster.intersectObjects(meshes, false);
+    const floorHit = hits
+      .map((hit) => ({ hit, local: worldToTilesLocal(hit.point.clone()), world: hit.point.clone() }))
+      .filter(({ hit }) => getHitNormalDotUp(hit) > 0.55)
+      [0];
+
+    return floorHit
+      ? {
+        local: floorHit.local.clone(),
+        world: floorHit.world.clone(),
+      }
+      : null;
+  }
+
+  function isTilesHorizontalMotionBlocked(currentX, currentZ, nextX, nextZ, radius, supportY, minRayHeight = 0.18) {
+    const meshes = getTileCollisionMeshList();
+    if (meshes.length === 0) {
+      return false;
+    }
+
+    tilesRayDirection.set(nextX - currentX, 0, nextZ - currentZ);
+    const distance = tilesRayDirection.length();
+    if (distance < 1e-5) {
+      return false;
+    }
+
+    tilesRayDirection.normalize();
+    const rayHeights = [minRayHeight, Math.max(minRayHeight + 0.18, 0.56), Math.max(minRayHeight + 0.36, 0.86)];
+    for (const height of rayHeights) {
+      tilesAnchoredLocalToWorld(currentX, supportY + height, currentZ, tilesRayOrigin);
+      const worldStep = tilesAnchoredLocalToWorld(nextX, supportY + height, nextZ, new THREE.Vector3()).sub(tilesRayOrigin);
+      const worldDistance = worldStep.length();
+      tilesWallRaycaster.set(tilesRayOrigin, worldStep.normalize());
+      tilesWallRaycaster.near = 0;
+      tilesWallRaycaster.far = worldDistance + radius;
+      const hits = tilesWallRaycaster.intersectObjects(meshes, false);
+      if (hits.some((hit) => Math.abs(getHitNormalDotUp(hit)) < 0.72)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function resolveTilesMotion(nextX, nextZ, currentX, currentZ, currentSupportY, radius) {
+    let resolvedX = currentX;
+    let resolvedZ = currentZ;
+
+    const candidateSupportX = findTilesSupportY(nextX, currentZ, currentSupportY);
+    const xStepHeight = candidateSupportX === null ? Infinity : candidateSupportX - currentSupportY;
+    const xRayMin = xStepHeight > 0 ? Math.min(0.88, xStepHeight + 0.16) : 0.18;
+    if (
+      candidateSupportX !== null &&
+      xStepHeight <= tilesStepHeight &&
+      !isTilesHorizontalMotionBlocked(currentX, currentZ, nextX, currentZ, radius, currentSupportY, xRayMin)
+    ) {
+      resolvedX = nextX;
+    }
+
+    const supportAfterX = findTilesSupportY(resolvedX, currentZ, currentSupportY);
+    const baseSupportZ = supportAfterX ?? currentSupportY;
+    const candidateSupportZ = findTilesSupportY(resolvedX, nextZ, baseSupportZ);
+    const zStepHeight = candidateSupportZ === null ? Infinity : candidateSupportZ - baseSupportZ;
+    const zRayMin = zStepHeight > 0 ? Math.min(0.88, zStepHeight + 0.16) : 0.18;
+    if (
+      supportAfterX !== null &&
+      candidateSupportZ !== null &&
+      zStepHeight <= tilesStepHeight &&
+      !isTilesHorizontalMotionBlocked(resolvedX, currentZ, resolvedX, nextZ, radius, supportAfterX, zRayMin)
+    ) {
+      resolvedZ = nextZ;
+    }
+
+    const finalSupport = findTilesSupportY(resolvedX, resolvedZ, currentSupportY);
+
+    return {
+      x: finalSupport === null ? currentX : resolvedX,
+      z: finalSupport === null ? currentZ : resolvedZ,
+      supportY: finalSupport === null ? currentSupportY : finalSupport,
+    };
+  }
+
+  function placeRobotOnTilesSpawn() {
+    const spawnPoint = findTilesSpawnFromVisibleBounds() ?? findTilesSpawnSurface();
+    if (!modeState.tilesSpawned && sceneRefs.tilesGroupOffset) {
+      const recenterOffset = spawnPoint.world.clone().multiplyScalar(-1);
+      sceneRefs.tilesGroupOffset.position.add(recenterOffset);
+      modeState.tilesFrame?.origin?.add(recenterOffset);
+      spawnPoint.world.add(recenterOffset);
+      updateTilesWorldMatrices();
+      requestTilesRefresh();
+    }
+    modeState.tilesRobotAnchorLocal = spawnPoint.local.clone();
+    modeState.tilesRobotAnchorWorld = spawnPoint.world.clone();
+    tilesMotionState.x = spawnPoint.local.x;
+    tilesMotionState.z = spawnPoint.local.z;
+    tilesMotionState.yaw = 0;
+    tilesMotionState.jumpY = 0;
+    tilesMotionState.velocityY = 0;
+    tilesMotionState.isGrounded = true;
+    tilesMotionState.supportY = spawnPoint.local.y;
+    tilesMotionState.groundOffset = activeRobot.groundOffset;
+    copyMotionState(motionState, tilesMotionState);
+    syncActiveRobotTransform();
+    activeRobot.root.visible = true;
+    startMarker.visible = false;
+    goalMarker.visible = false;
+    routeGroup.visible = false;
+    modeState.tilesSpawned = true;
+  }
+
+  function placeRobotOnTilesHit(hit) {
+    if (!hit || getHitNormalDotUp(hit) <= 0.35) {
+      updatePlannerStatus("Click an upward-facing tile surface to spawn the robot.");
+      return false;
+    }
+
+    modeState.tilesSpawnArmed = false;
+    const spawnWorld = hit.point.clone();
+    const spawnLocal = worldToTilesLocal(spawnWorld.clone());
+    modeState.tilesRobotAnchorLocal = spawnLocal.clone();
+    modeState.tilesRobotAnchorWorld = spawnWorld.clone();
+    tilesMotionState.x = spawnLocal.x;
+    tilesMotionState.z = spawnLocal.z;
+    tilesMotionState.yaw = 0;
+    tilesMotionState.jumpY = 0;
+    tilesMotionState.velocityY = 0;
+    tilesMotionState.isGrounded = true;
+    tilesMotionState.supportY = spawnLocal.y;
+    tilesMotionState.groundOffset = activeRobot.groundOffset;
+    copyMotionState(motionState, tilesMotionState);
+    syncActiveRobotTransform();
+    activeRobot.root.visible = true;
+    startMarker.visible = false;
+    goalMarker.visible = false;
+    routeGroup.visible = false;
+    modeState.tilesSpawned = true;
+    syncTilesetControls();
+    updatePlannerStatus("Robot spawned on the 3D Tiles surface. WASD now moves relative to the robot heading.");
+    return true;
+  }
+
+  function scheduleRobotOnTilesSpawn() {
+    if (modeState.tilesSpawned || tilesSpawnRequest !== null) {
+      return;
+    }
+
+    tilesSpawnRequest = requestAnimationFrame(() => {
+      tilesSpawnRequest = null;
+      if (modeState.mapMode !== "tiles3d" || modeState.tilesSpawned || getTileCollisionMeshList().length === 0) {
+        return;
+      }
+      placeRobotOnTilesSpawn();
+    });
+  }
+
+  function requestTilesRefresh(frames = 24) {
+    tilesRefreshFrames = Math.max(tilesRefreshFrames, frames);
+  }
+
+  function resetSandboxCamera() {
+    cameraState.mode = "free";
+    orbitState.azimuth = Math.PI * 0.84;
+    orbitState.polar = 0.88;
+    orbitState.distance = clamp(Math.max(cfg.map.width_m, cfg.map.height_m) * 0.78, 5.2, 16);
+    orbitState.target.set(0, 0.28, 0);
+    clampOrbitTarget();
+    saveCurrentViewState("sandbox");
+    syncCameraModeButton();
+  }
+
+  function disposeTilesetRenderer() {
+    modeState.tilesRobotAnchorLocal = null;
+    modeState.tilesRobotAnchorWorld = null;
+    modeState.tilesSpawnArmed = false;
+    if (tilesSpawnRequest !== null) {
+      cancelAnimationFrame(tilesSpawnRequest);
+      tilesSpawnRequest = null;
+    }
+    if (!sceneRefs.tilesRenderer) {
+      return;
+    }
+
+    scene.remove(sceneRefs.tilesGroupOffset);
+    sceneRefs.tilesRenderer.dispose?.();
+    sceneRefs.tilesGroupOffset.clear();
+    sceneRefs.tilesRenderer = null;
+    sceneRefs.tilesGroupOffset = new THREE.Group();
+    modeState.tileCollisionMeshes.clear();
+    modeState.tilesetLoaded = false;
+    modeState.tilesSpawned = false;
+    modeState.tilesFrame = null;
+  }
+
+  async function loadTileset(url) {
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) {
+      updatePlannerStatus("Enter a tileset.json path first.");
+      return false;
+    }
+
+    disposeTilesetRenderer();
+    updateLoadingState("Loading 3D Tiles...");
+    updatePlannerStatus("Loading 3D Tiles tileset...");
+
+    try {
+      const regionFrame = await loadTilesetRegionFrame(trimmedUrl);
+      const { TilesRenderer } = await import("3d-tiles-renderer");
+      const [{ GLTFExtensionsPlugin }, { DRACOLoader }] = await Promise.all([
+        import("https://esm.sh/3d-tiles-renderer@0.4.18/plugins?target=es2022&external=three"),
+        import("three/examples/jsm/loaders/DRACOLoader.js"),
+      ]);
+      const tilesRenderer = new TilesRenderer(trimmedUrl);
+      tilesRenderer.displayActiveTiles = true;
+      tilesRenderer.errorTarget = 12;
+      tilesRenderer.setCamera(camera);
+      tilesRenderer.setResolutionFromRenderer(camera, renderer);
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath("https://unpkg.com/three@0.170.0/examples/jsm/libs/draco/gltf/");
+      tilesRenderer.registerPlugin(
+        new GLTFExtensionsPlugin({
+          dracoLoader,
+          rtc: true,
+          metadata: true,
+          plugins: [],
+          ktxLoader: null,
+          autoDispose: true,
+        })
+      );
+      sceneRefs.tilesRenderer = tilesRenderer;
+      sceneRefs.tilesGroupOffset = tilesRenderer.group;
+      scene.add(sceneRefs.tilesGroupOffset);
+      let didFrameTileset = false;
+      let loadedModelCount = 0;
+      const visibleTiles = new Set();
+
+      const updateTilesDebugStatus = (prefix = "3D Tiles loaded") => {
+        updatePlannerStatus(
+          `${prefix}. models ${loadedModelCount}, visible ${visibleTiles.size}. Current navigation still uses the flat map and manual obstacle layout.`
+        );
+      };
+
+      const onTilesetReady = () => {
+        if (didFrameTileset) {
+          return;
+        }
+        const sphere = new THREE.Sphere();
+        const hasBounds = tilesRenderer.getBoundingSphere(sphere);
+        modeState.tilesFrame = regionFrame ?? {
+          center: sphere.center.clone(),
+          radius: sphere.radius,
+          ...makeEcefAxes(sphere.center),
+        };
+        if (hasBounds && Number.isFinite(sphere.radius) && sphere.radius > 0) {
+          tilesRenderer.group.position.copy(sphere.center).multiplyScalar(-1);
+          tilesRenderer.group.quaternion.identity();
+          modeState.tilesFrame.origin = regionFrame
+            ? regionFrame.center.clone().sub(sphere.center)
+            : new THREE.Vector3(0, 0, 0);
+          sceneRefs.tilesGroupOffset.updateMatrixWorld(true);
+          orbitState.target.set(0, 0, 0);
+          orbitState.distance = clamp(sphere.radius * 2.2, 30, 12000);
+          orbitState.azimuth = Math.PI * 0.72;
+          orbitState.polar = 1.02;
+          camera.near = 0.1;
+          camera.far = Math.max(2500, sphere.radius * 50);
+          camera.up.copy(getTilesUpAxis());
+          camera.updateProjectionMatrix();
+          clampOrbitTarget();
+          requestTilesRefresh(36);
+          didFrameTileset = true;
+        }
+        modeState.tilesetLoaded = true;
+        updateLoadingState(`${activeRobot.label} + 3D Tiles View`);
+        updateTilesDebugStatus("3D Tiles loaded. Click the tiles surface to spawn the robot");
+      };
+
+      tilesRenderer.addEventListener("load-tileset", onTilesetReady);
+      tilesRenderer.addEventListener("load-tile-set", onTilesetReady);
+      tilesRenderer.addEventListener("tiles-load-start", () => {
+        updatePlannerStatus("3D Tiles download started...");
+      });
+      tilesRenderer.addEventListener("tiles-load-end", () => {
+        if (modeState.tilesetLoaded) {
+          updateTilesDebugStatus("3D Tiles visible");
+        } else {
+          updatePlannerStatus("3D Tiles downloads finished, but no centered view was confirmed yet.");
+        }
+      });
+      tilesRenderer.addEventListener("load-error", (event) => {
+        const message = event?.error?.message ?? event?.message ?? "Unknown 3D Tiles load error";
+        updateLoadingState("3D Tiles load error");
+        updatePlannerStatus(`3D Tiles load error: ${message}`);
+      });
+
+      tilesRenderer.addEventListener("load-model", ({ scene: tileScene }) => {
+        loadedModelCount += 1;
+        tileScene.traverse((node) => {
+          if (node.isMesh) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+            modeState.tileCollisionMeshes.add(node);
+          }
+        });
+        if (modeState.tilesetLoaded) {
+          updateTilesDebugStatus("3D Tiles model loaded");
+        }
+      });
+      tilesRenderer.addEventListener("tile-visibility-change", (event) => {
+        if (event.visible) {
+          visibleTiles.add(event.tile);
+        } else {
+          visibleTiles.delete(event.tile);
+        }
+        if (modeState.tilesetLoaded) {
+          updateTilesDebugStatus("3D Tiles visible");
+        }
+      });
+
+      modeState.tilesetUrl = trimmedUrl;
+      saveStoredTilesetUrl(trimmedUrl);
+      modeState.mapMode = "tiles3d";
+      modeState.tilesetPanelOpen = true;
+      syncMapModeSceneVisibility();
+      syncTilesetControls();
+      return true;
+    } catch (error) {
+      disposeTilesetRenderer();
+      modeState.mapMode = "sandbox";
+      modeState.tilesetLoaded = false;
+      syncMapModeSceneVisibility();
+      syncTilesetControls();
+      updateLoadingState("3D Tiles load failed");
+      updatePlannerStatus(`Failed to load 3D Tiles: ${error.message ?? error}`);
+      return false;
+    }
+  }
+
+  async function setMapMode(mode, options = {}) {
+    saveCurrentModeMotionState();
+    saveCurrentViewState(modeState.mapMode);
+    modeState.mapMode = mode;
+
+    if (mode === "tiles3d") {
+      loadModeMotionState("tiles3d");
+      loadViewState("tiles3d");
+      if (cameraState.mode === "follow") {
+        setCameraMode("free");
+      }
+      camera.up.copy(getTilesUpAxis());
+      const shouldLoad = options.forceReload || !sceneRefs.tilesRenderer || !modeState.tilesetLoaded;
+      if (shouldLoad) {
+        const url = document.getElementById("tileset-url-input")?.value ?? modeState.tilesetUrl;
+        return await loadTileset(url);
+      } else {
+        modeState.tilesetPanelOpen = true;
+        syncMapModeSceneVisibility();
+        syncTilesetControls();
+        updatePlannerStatus("3D Tiles mode active. Current navigation still uses the flat map and manual obstacle layout.");
+        return true;
+      }
+    } else {
+      disposeTilesetRenderer();
+      loadModeMotionState("sandbox");
+      loadViewState("sandbox");
+      modeState.tilesetPanelOpen = false;
+      syncMapModeSceneVisibility();
+      syncTilesetControls();
+      camera.up.copy(upAxis);
+      camera.near = 0.1;
+      camera.far = 180;
+      camera.updateProjectionMatrix();
+      updateLoadingState(activeRobot.type === "turtlebot3" ? "Wheel Robot + Navigation View" : "Legged Robot + Navigation View");
+      updatePlannerStatus("Sandbox map mode active.");
+      return true;
+    }
   }
 
   function updateEditorStatus(text) {
@@ -1758,6 +2110,9 @@ async function main() {
   }
 
   function clampOrbitTarget() {
+    if (modeState.mapMode === "tiles3d") {
+      return;
+    }
     orbitState.target.x = clamp(orbitState.target.x, -cfg.map.width_m * 0.85, cfg.map.width_m * 0.85);
     orbitState.target.z = clamp(orbitState.target.z, -cfg.map.height_m * 0.85, cfg.map.height_m * 0.85);
     orbitState.target.y = clamp(orbitState.target.y, 0.05, 3.5);
@@ -1778,13 +2133,19 @@ async function main() {
   function setCameraMode(mode) {
     cameraState.mode = mode;
     if (mode === "free") {
-      orbitState.target.set(motionState.x, 0.32, motionState.z);
-      clampOrbitTarget();
-    } else {
+      if (modeState.mapMode === "tiles3d") {
+        focusOrbitTargetOnRobot();
+      } else {
+        orbitState.target.set(motionState.x, 0.32, motionState.z);
+        clampOrbitTarget();
+      }
+    } else if (modeState.mapMode === "tiles3d") {
+      orbitState.distance = clamp(orbitState.distance, 14, 32);
       orbitState.azimuth = Math.PI;
-      orbitState.polar = 0.92;
-      orbitState.distance = 3.5;
+      orbitState.polar = 1.02;
+      focusOrbitTargetOnRobot(0.18);
     }
+    saveCurrentViewState(modeState.mapMode);
     syncCameraModeButton();
   }
 
@@ -1821,7 +2182,12 @@ async function main() {
       "set-goal-btn": ["Goal", "Place route goal"],
       "plan-path-btn": ["Plan", "Build shortest path"],
       "auto-nav-btn": ["Auto", "Start or stop tracking"],
+      "viewer-page-btn": ["Viewer", "Return to sandbox view"],
       "map-edit-btn": ["Map Edit", "Open 3D editor"],
+      "tiles-page-btn": ["3D City", "Open PLATEAU viewer"],
+      "tiles-mode-btn": ["3D Tiles", "Open city tiles mode"],
+      "tileset-load-btn": ["Load Tileset", "Read tileset.json"],
+      "tileset-sandbox-btn": ["Sandbox", "Return to flat map"],
       "editor-select-btn": ["Select", "Pick and move"],
       "editor-add-btn": ["Add", "Place obstacle"],
       "editor-delete-btn": ["Delete", "Remove obstacle"],
@@ -1857,6 +2223,9 @@ async function main() {
     document.getElementById("set-goal-btn")?.classList.add("route-button");
     document.getElementById("plan-path-btn")?.classList.add("route-button");
     document.getElementById("auto-nav-btn")?.classList.add("route-button");
+    if (appMode !== "tiles") {
+      document.getElementById("map-edit-btn")?.classList.add("accent-button");
+    }
   }
 
   function hydrateGuidePanel() {
@@ -2234,65 +2603,51 @@ async function main() {
       return;
     }
 
-    const inflatedBounds = inflateBounds(obstacleBounds, robotCollisionRadius + 0.03);
-    if (
-      inflatedBounds.some((rect) => pointInRect(plannerState.start, rect)) ||
-      inflatedBounds.some((rect) => pointInRect(plannerState.goal, rect))
-    ) {
-      updatePlannerStatus("Start or goal is inside an obstacle margin.");
-      return;
-    }
+    const plannerModule = plannerModules[plannerState.plannerKey];
+    const planResult = plannerModule.plan({
+      start: plannerState.start,
+      goal: plannerState.goal,
+      obstacleBounds,
+      mapWidth: cfg.map.width_m,
+      mapHeight: cfg.map.height_m,
+      clearance: robotCollisionRadius + 0.03,
+    });
 
-    const { nodes, graph } = buildVisibilityGraph(
-      plannerState.start,
-      plannerState.goal,
-      inflatedBounds,
-      cfg.map.width_m,
-      cfg.map.height_m
-    );
-    const rawPath = dijkstraShortestPath(nodes, graph, 0, 1);
-    if (!rawPath) {
+    if (!planResult.ok) {
       plannerState.path = null;
       plannerState.polylineMetrics = null;
       plannerState.smoothPath = null;
       plannerState.smoothPathMetrics = null;
-      plannerState.debugData = null;
+      plannerState.debugData = planResult.debugData ?? null;
       plannerState.autoActive = false;
-      plannerState.autoSegmentPhase = "align";
+      plannerState.followerKey = null;
+      plannerState.followerState = null;
       clearRouteRender();
-      showPlannerDebugPanel(false);
-      updatePlannerStatus("No collision-free path found.");
+      if (planResult.debugData) {
+        drawPlannerDebugView(planResult.debugData, cfg, activeRobot.label);
+      } else {
+        showPlannerDebugPanel(false);
+      }
+      updatePlannerStatus(
+        planResult.reason === "blocked-endpoint"
+          ? "Start or goal is inside an obstacle margin."
+          : "No collision-free path found."
+      );
       return;
     }
 
-    plannerState.path = prunePath(rawPath, inflatedBounds);
-    plannerState.polylineMetrics = computePathMetrics(plannerState.path);
-    plannerState.smoothPath = buildSmoothPath(plannerState.path);
-    plannerState.smoothPathMetrics = computePathMetrics(plannerState.smoothPath);
-    plannerState.debugData = {
-      start: plannerState.start,
-      goal: plannerState.goal,
-      nodes,
-      graph,
-      rawPath,
-      path: plannerState.path,
-      obstacleBounds,
-      inflatedBounds,
-    };
+    plannerState.path = planResult.path;
+    plannerState.polylineMetrics = planResult.polylineMetrics;
+    plannerState.smoothPath = planResult.smoothPath;
+    plannerState.smoothPathMetrics = planResult.smoothPathMetrics;
+    plannerState.debugData = planResult.debugData;
     plannerState.autoActive = false;
-    plannerState.autoSegmentIndex = 1;
-    plannerState.autoSegmentPhase = "align";
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     clearRouteRender();
     routeGroup.add(buildPathRenderables(plannerState.path, activeRobot.type));
     drawPlannerDebugView(plannerState.debugData, cfg, activeRobot.label);
-
-    const totalLength = plannerState.path.reduce((sum, point, index) => {
-      if (index === 0) {
-        return sum;
-      }
-      return sum + Math.hypot(point.x - plannerState.path[index - 1].x, point.z - plannerState.path[index - 1].z);
-    }, 0);
-    updatePlannerStatus(`Path planned. ${plannerState.path.length} nodes / ${totalLength.toFixed(2)}m`);
+    updatePlannerStatus(`Path planned. ${plannerState.path.length} nodes / ${planResult.totalLength.toFixed(2)}m`);
   }
 
   function beginAutoNav() {
@@ -2307,41 +2662,21 @@ async function main() {
     autoCommandState.turn = 0;
     autoCommandState.speed = 0;
     showPlannerDebugPanel(false);
-    const currentPoint = { x: motionState.x, z: motionState.z };
-    if (activeRobot.type === "go2") {
-      const projection = projectPointOntoPath(
-        currentPoint,
-        plannerState.path,
-        plannerState.polylineMetrics
-      );
-      plannerState.pathProgress = projection.progress;
-      plannerState.autoEntryPoint = { x: projection.point.x, z: projection.point.z };
-      plannerState.autoEntryTargetIndex = clamp(
-        projection.segmentIndex + 1,
-        1,
-        plannerState.path.length - 1
-      );
-      plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
-      const entryDistance = Math.hypot(
-        projection.point.x - motionState.x,
-        projection.point.z - motionState.z
-      );
-      plannerState.autoSegmentPhase = entryDistance > 0.08 ? "startAlign" : "align";
-    } else {
-      if (!plannerState.smoothPath || !plannerState.smoothPathMetrics) {
-        updatePlannerStatus("Plan a smooth path before starting auto nav.");
-        plannerState.autoActive = false;
-        return;
-      }
-      const projection = projectPointOntoPath(
-        currentPoint,
-        plannerState.smoothPath,
-        plannerState.smoothPathMetrics
-      );
-      plannerState.pathProgress = projection.progress;
-      plannerState.autoSegmentIndex = 1;
-      plannerState.autoSegmentPhase = "align";
+    const followerKey = activeRobot.type === "go2" ? "go2Polyline" : "turtlebotSmooth";
+    const followerModule = followerModules[followerKey];
+
+    if (followerKey === "turtlebotSmooth" && (!plannerState.smoothPath || !plannerState.smoothPathMetrics)) {
+      updatePlannerStatus("Plan a smooth path before starting auto nav.");
+      plannerState.autoActive = false;
+      return;
     }
+
+    plannerState.followerKey = followerKey;
+    plannerState.followerState = followerModule.begin({
+      plannerState,
+      motionState,
+      projectPointOntoPath,
+    });
     updatePlannerStatus("Auto navigation running.");
     document.getElementById("auto-nav-btn").textContent = "Stop Auto";
     document.getElementById("auto-nav-btn").classList.add("is-active");
@@ -2349,11 +2684,8 @@ async function main() {
 
   function stopAutoNav(statusText) {
     plannerState.autoActive = false;
-    plannerState.pathProgress = 0;
-    plannerState.autoSegmentIndex = 1;
-    plannerState.autoSegmentPhase = "align";
-    plannerState.autoEntryPoint = null;
-    plannerState.autoEntryTargetIndex = 1;
+    plannerState.followerKey = null;
+    plannerState.followerState = null;
     autoCommandState.forward = 0;
     autoCommandState.lateral = 0;
     autoCommandState.turn = 0;
@@ -2366,8 +2698,13 @@ async function main() {
   }
 
   function syncPoseToHud() {
-    cfg.go2_pose.x_m = Number((motionState.x + cfg.map.width_m / 2).toFixed(2));
-    cfg.go2_pose.y_m = Number((motionState.z + cfg.map.height_m / 2).toFixed(2));
+    if (modeState.mapMode === "tiles3d" && modeState.tilesRobotAnchorLocal) {
+      cfg.go2_pose.x_m = Number((motionState.x - modeState.tilesRobotAnchorLocal.x).toFixed(2));
+      cfg.go2_pose.y_m = Number((motionState.z - modeState.tilesRobotAnchorLocal.z).toFixed(2));
+    } else {
+      cfg.go2_pose.x_m = Number((motionState.x + cfg.map.width_m / 2).toFixed(2));
+      cfg.go2_pose.y_m = Number((motionState.z + cfg.map.height_m / 2).toFixed(2));
+    }
     cfg.go2_pose.yaw_deg = Math.round((-motionState.yaw * 180) / Math.PI);
     updateHud(cfg, activeRobot.label);
   }
@@ -2443,12 +2780,38 @@ async function main() {
     orbitState.lastY = event.clientY;
     if (dragMode === "pan") {
       orbitState.panPlaneY = 0;
+      if (modeState.mapMode === "tiles3d") {
+        camera.updateMatrixWorld();
+        orbitState.panRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+        orbitState.panUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+      }
     }
     renderer.domElement.setPointerCapture(event.pointerId);
   }
 
   function onPointerDown(event) {
     setPointerFromEvent(event);
+
+    if (modeState.mapMode === "tiles3d" && !editorState.isOpen) {
+      if (event.button === 2) {
+        beginCameraDrag(event, "pan");
+        return;
+      }
+
+      if (event.button === 0 && modeState.tilesSpawnArmed) {
+        const tileHits = raycaster
+          .intersectObjects(getTileCollisionMeshList(), false)
+          .filter((hit) => getHitNormalDotUp(hit) > 0.35);
+        if (tileHits.length > 0 && placeRobotOnTilesHit(tileHits[0])) {
+          return;
+        }
+      }
+
+      if (event.button === 0) {
+        beginCameraDrag(event, "orbit");
+      }
+      return;
+    }
 
     if (editorState.isOpen) {
       if (event.button === 2) {
@@ -2701,14 +3064,23 @@ async function main() {
     orbitState.lastY = event.clientY;
 
     if ((editorState.isOpen || cameraState.mode === "free") && orbitState.dragMode === "pan") {
+      if (modeState.mapMode === "tiles3d") {
+        const panScale = Math.max(orbitState.distance * 0.0022, 0.0035);
+        orbitState.target.addScaledVector(orbitState.panRight, -deltaX * panScale);
+        orbitState.target.addScaledVector(orbitState.panUp, deltaY * panScale);
+        clampOrbitTarget();
+        return;
+      }
+
+      const currentUp = getCurrentUpAxis();
       camera.getWorldDirection(cameraForward);
-      cameraForward.y = 0;
+      cameraForward.addScaledVector(currentUp, -cameraForward.dot(currentUp));
       if (cameraForward.lengthSq() < 1e-6) {
-        cameraForward.set(0, 0, -1);
+        cameraForward.copy(modeState.mapMode === "tiles3d" && modeState.tilesFrame ? modeState.tilesFrame.north : new THREE.Vector3(0, 0, -1));
       } else {
         cameraForward.normalize();
       }
-      cameraRight.crossVectors(cameraForward, upAxis).normalize();
+      cameraRight.crossVectors(cameraForward, currentUp).normalize();
       const panScale = Math.max(orbitState.distance * 0.0022, 0.0035);
       orbitState.target.addScaledVector(cameraRight, -deltaX * panScale);
       orbitState.target.addScaledVector(cameraForward, deltaY * panScale);
@@ -2717,7 +3089,9 @@ async function main() {
     }
 
     orbitState.azimuth -= deltaX * 0.01;
-    orbitState.polar = clamp(orbitState.polar + deltaY * 0.008, 0.35, 1.35);
+    orbitState.polar = modeState.mapMode === "tiles3d"
+      ? clamp(orbitState.polar + deltaY * 0.008, 0.08, Math.PI - 0.08)
+      : clamp(orbitState.polar + deltaY * 0.008, 0.35, 1.35);
   }
 
   function onPointerUp(event) {
@@ -2757,6 +3131,12 @@ async function main() {
 
   function onWheel(event) {
     event.preventDefault();
+    if (modeState.mapMode === "tiles3d") {
+      const zoomFactor = Math.exp(event.deltaY * 0.0018);
+      orbitState.distance = clamp(orbitState.distance * zoomFactor, 0.2, 100000);
+      return;
+    }
+
     orbitState.distance = clamp(
       orbitState.distance + event.deltaY * 0.0035,
       editorState.isOpen || cameraState.mode === "free" ? 3.2 : 2.1,
@@ -2774,8 +3154,31 @@ async function main() {
   });
   hydrateHudButtons();
   hydrateGuidePanel();
+  if (appMode === "viewer") {
+    modeState.mapMode = "sandbox";
+    loadModeMotionState("sandbox");
+    resetRobotsToConfigPose();
+    resetSandboxCamera();
+    camera.up.copy(upAxis);
+    syncMapModeSceneVisibility();
+  } else if (appMode === "tiles") {
+    modeState.mapMode = "tiles3d";
+    loadModeMotionState("tiles3d");
+    loadViewState("tiles3d");
+    camera.up.copy(upAxis);
+    syncMapModeSceneVisibility();
+    startMarker.visible = false;
+    goalMarker.visible = false;
+    routeGroup.visible = false;
+    for (const robot of Object.values(robots)) {
+      robot.root.visible = false;
+    }
+    updatePlannerStatus("Load a 3D tileset to begin.");
+  }
   syncCameraModeButton();
   syncGuideVisibility();
+  syncTilesetControls();
+  syncPositionPanel();
   if (appMode === "editor") {
     showEditorScreen(true);
   }
@@ -2784,6 +3187,16 @@ async function main() {
   });
   document.getElementById("guide-toggle-btn")?.addEventListener("click", () => {
     toggleGuideVisibility();
+  });
+  document.getElementById("position-toggle-btn")?.addEventListener("click", () => {
+    modeState.positionPanelOpen = !modeState.positionPanelOpen;
+    syncTilesetControls();
+    syncPositionPanel();
+  });
+  document.getElementById("position-float-btn")?.addEventListener("click", () => {
+    modeState.positionPanelOpen = !modeState.positionPanelOpen;
+    syncTilesetControls();
+    syncPositionPanel();
   });
   document.getElementById("set-start-btn").addEventListener("click", () => {
     setStartToRobotPosition();
@@ -2810,100 +3223,156 @@ async function main() {
     saveStoredMapState(cfg, mapState);
     window.location.href = "./editor.html";
   });
-  document.getElementById("editor-close-btn").addEventListener("click", () => {
+  document.getElementById("tiles-page-btn")?.addEventListener("click", () => {
+    saveStoredMapState(cfg, mapState);
+    window.location.href = "./tiles.html";
+  });
+  document.getElementById("viewer-page-btn")?.addEventListener("click", () => {
     saveStoredMapState(cfg, mapState);
     window.location.href = "./index.html";
   });
-  document.getElementById("editor-select-btn").addEventListener("click", () => {
-    setEditorMode("select");
-    updateEditorStatus("Click an obstacle to select and drag it.");
+  document.getElementById("tiles-mode-btn")?.addEventListener("click", async () => {
+    modeState.tilesetPanelOpen = !modeState.tilesetPanelOpen;
+    syncTilesetControls();
   });
-  document.getElementById("editor-add-btn").addEventListener("click", () => {
-    setEditorMode("add");
-    updateEditorStatus("Click the 3D map to place an obstacle.");
+  document.getElementById("tileset-load-btn")?.addEventListener("click", async () => {
+    const nextUrl = document.getElementById("tileset-url-input")?.value ?? modeState.tilesetUrl;
+    modeState.tilesetUrl = nextUrl.trim() || modeState.tilesetUrl;
+    await setMapMode("tiles3d", { forceReload: true });
   });
-  document.getElementById("editor-delete-btn").addEventListener("click", () => {
-    setEditorMode("delete");
-    updateEditorStatus("Click an obstacle in 3D to delete it.");
-  });
-  document.getElementById("editor-spawn-btn").addEventListener("click", () => {
-    setEditorMode("spawn");
-    updateEditorStatus("Click the 3D map to place the spawn point.");
-  });
-  document.getElementById("editor-apply-btn").addEventListener("click", () => {
-    applyMapChangesFromEditor();
-  });
-  document.getElementById("editor-canvas").addEventListener("click", (event) => {
-    const point = editorCanvasToMapPoint(event);
-    if (editorState.mode === "add") {
-      const w = clamp(Number(document.getElementById("editor-obstacle-width").value) || 0.8, 0.2, 6);
-      const d = clamp(Number(document.getElementById("editor-obstacle-depth").value) || 0.8, 0.2, 6);
-      const h = clamp(Number(document.getElementById("editor-obstacle-height").value) || 0.6, 0.1, 2);
-      mapState.obstacles.push({
-        x: clamp(point.x - w / 2, 0, Math.max(0, cfg.map.width_m - w)),
-        y: clamp(point.y - d / 2, 0, Math.max(0, cfg.map.height_m - d)),
-        w,
-        d,
-        h,
-      });
-      drawEditorView();
-      updateEditorStatus("Obstacle added.");
-    } else if (editorState.mode === "delete") {
-      const index = mapState.obstacles.findIndex((obstacle) =>
-        point.x >= obstacle.x &&
-        point.x <= obstacle.x + obstacle.w &&
-        point.y >= obstacle.y &&
-        point.y <= obstacle.y + obstacle.d
-      );
-      if (index >= 0) {
-        mapState.obstacles.splice(index, 1);
-        drawEditorView();
-        updateEditorStatus("Obstacle deleted.");
-      }
-    } else if (editorState.mode === "spawn") {
-      cfg.go2_pose.x_m = Number(point.x.toFixed(2));
-      cfg.go2_pose.y_m = Number(point.y.toFixed(2));
-      drawEditorView();
-      updateEditorStatus("Spawn point moved.");
+  document.getElementById("tileset-preset-select")?.addEventListener("change", (event) => {
+    const nextUrl = event.target.value;
+    if (!nextUrl) {
+      return;
     }
+    modeState.tilesetUrl = nextUrl;
+    saveStoredTilesetUrl(modeState.tilesetUrl);
+    const input = document.getElementById("tileset-url-input");
+    if (input) {
+      input.value = nextUrl;
+    }
+    syncTilesetControls();
   });
-  [
-    "editor-box-x",
-    "editor-box-y",
-    "editor-box-elevation",
-    "editor-box-height",
-    "editor-box-width",
-    "editor-box-depth",
-  ].forEach((id) => {
-    document.getElementById(id).addEventListener("input", () => {
-      const obstacle = getObstacleById(editorState.selectedObstacleId);
-      if (!obstacle) {
-        return;
-      }
-      const nextX = Number(document.getElementById("editor-box-x").value);
-      const nextY = Number(document.getElementById("editor-box-y").value);
-      const nextElevation = Number(document.getElementById("editor-box-elevation").value);
-      const nextHeight = Number(document.getElementById("editor-box-height").value);
-      const nextWidth = Number(document.getElementById("editor-box-width").value);
-      const nextDepth = Number(document.getElementById("editor-box-depth").value);
-      obstacle.w = clamp(Number.isFinite(nextWidth) ? nextWidth : obstacle.w, 0.2, 6);
-      obstacle.d = clamp(Number.isFinite(nextDepth) ? nextDepth : obstacle.d, 0.2, 6);
-      obstacle.h = clamp(Number.isFinite(nextHeight) ? nextHeight : obstacle.h, 0.1, 4);
-      obstacle.elevation = clamp(Number.isFinite(nextElevation) ? nextElevation : obstacle.elevation ?? 0, 0, 4);
-      obstacle.x = clamp(Number.isFinite(nextX) ? nextX : obstacle.x, 0, Math.max(0, cfg.map.width_m - obstacle.w));
-      obstacle.y = clamp(Number.isFinite(nextY) ? nextY : obstacle.y, 0, Math.max(0, cfg.map.height_m - obstacle.d));
-      refreshSceneGeometry();
-      selectObstacle(obstacle.id);
-      clearPathState();
-      drawEditorView();
-      updateEditorStatus("Selected obstacle updated.");
+  document.getElementById("tiles-spawn-btn")?.addEventListener("click", () => {
+    if (modeState.mapMode !== "tiles3d" || !modeState.tilesetLoaded) {
+      updatePlannerStatus("Load a 3D Tiles tileset before spawning the robot.");
+      return;
+    }
+    modeState.tilesSpawnArmed = true;
+    syncTilesetControls();
+    updatePlannerStatus(
+      modeState.tilesSpawned
+        ? "Respawn armed. Click a 3D Tiles surface to move the robot."
+        : "Spawn armed. Click a 3D Tiles surface to place the robot."
+    );
+  });
+  document.getElementById("tileset-sandbox-btn")?.addEventListener("click", async () => {
+    await setMapMode("sandbox");
+  });
+  document.getElementById("tileset-url-input")?.addEventListener("change", (event) => {
+    modeState.tilesetUrl = event.target.value.trim() || modeState.tilesetUrl;
+    saveStoredTilesetUrl(modeState.tilesetUrl);
+    syncTilesetControls();
+  });
+  if (appMode === "editor") {
+    document.getElementById("editor-close-btn").addEventListener("click", () => {
+      saveStoredMapState(cfg, mapState);
+      window.location.href = "./index.html";
     });
-  });
+    document.getElementById("editor-select-btn").addEventListener("click", () => {
+      setEditorMode("select");
+      updateEditorStatus("Click an obstacle to select and drag it.");
+    });
+    document.getElementById("editor-add-btn").addEventListener("click", () => {
+      setEditorMode("add");
+      updateEditorStatus("Click the 3D map to place an obstacle.");
+    });
+    document.getElementById("editor-delete-btn").addEventListener("click", () => {
+      setEditorMode("delete");
+      updateEditorStatus("Click an obstacle in 3D to delete it.");
+    });
+    document.getElementById("editor-spawn-btn").addEventListener("click", () => {
+      setEditorMode("spawn");
+      updateEditorStatus("Click the 3D map to place the spawn point.");
+    });
+    document.getElementById("editor-apply-btn").addEventListener("click", () => {
+      applyMapChangesFromEditor();
+    });
+    document.getElementById("editor-canvas").addEventListener("click", (event) => {
+      const point = editorCanvasToMapPoint(event);
+      if (editorState.mode === "add") {
+        const w = clamp(Number(document.getElementById("editor-obstacle-width").value) || 0.8, 0.2, 6);
+        const d = clamp(Number(document.getElementById("editor-obstacle-depth").value) || 0.8, 0.2, 6);
+        const h = clamp(Number(document.getElementById("editor-obstacle-height").value) || 0.6, 0.1, 2);
+        mapState.obstacles.push({
+          x: clamp(point.x - w / 2, 0, Math.max(0, cfg.map.width_m - w)),
+          y: clamp(point.y - d / 2, 0, Math.max(0, cfg.map.height_m - d)),
+          w,
+          d,
+          h,
+        });
+        drawEditorView();
+        updateEditorStatus("Obstacle added.");
+      } else if (editorState.mode === "delete") {
+        const index = mapState.obstacles.findIndex((obstacle) =>
+          point.x >= obstacle.x &&
+          point.x <= obstacle.x + obstacle.w &&
+          point.y >= obstacle.y &&
+          point.y <= obstacle.y + obstacle.d
+        );
+        if (index >= 0) {
+          mapState.obstacles.splice(index, 1);
+          drawEditorView();
+          updateEditorStatus("Obstacle deleted.");
+        }
+      } else if (editorState.mode === "spawn") {
+        cfg.go2_pose.x_m = Number(point.x.toFixed(2));
+        cfg.go2_pose.y_m = Number(point.y.toFixed(2));
+        drawEditorView();
+        updateEditorStatus("Spawn point moved.");
+      }
+    });
+    [
+      "editor-box-x",
+      "editor-box-y",
+      "editor-box-elevation",
+      "editor-box-height",
+      "editor-box-width",
+      "editor-box-depth",
+    ].forEach((id) => {
+      document.getElementById(id).addEventListener("input", () => {
+        const obstacle = getObstacleById(editorState.selectedObstacleId);
+        if (!obstacle) {
+          return;
+        }
+        const nextX = Number(document.getElementById("editor-box-x").value);
+        const nextY = Number(document.getElementById("editor-box-y").value);
+        const nextElevation = Number(document.getElementById("editor-box-elevation").value);
+        const nextHeight = Number(document.getElementById("editor-box-height").value);
+        const nextWidth = Number(document.getElementById("editor-box-width").value);
+        const nextDepth = Number(document.getElementById("editor-box-depth").value);
+        obstacle.w = clamp(Number.isFinite(nextWidth) ? nextWidth : obstacle.w, 0.2, 6);
+        obstacle.d = clamp(Number.isFinite(nextDepth) ? nextDepth : obstacle.d, 0.2, 6);
+        obstacle.h = clamp(Number.isFinite(nextHeight) ? nextHeight : obstacle.h, 0.1, 4);
+        obstacle.elevation = clamp(Number.isFinite(nextElevation) ? nextElevation : obstacle.elevation ?? 0, 0, 4);
+        obstacle.x = clamp(Number.isFinite(nextX) ? nextX : obstacle.x, 0, Math.max(0, cfg.map.width_m - obstacle.w));
+        obstacle.y = clamp(Number.isFinite(nextY) ? nextY : obstacle.y, 0, Math.max(0, cfg.map.height_m - obstacle.d));
+        refreshSceneGeometry();
+        selectObstacle(obstacle.id);
+        clearPathState();
+        drawEditorView();
+        updateEditorStatus("Selected obstacle updated.");
+      });
+    });
+  }
 
   function resize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    if (sceneRefs.tilesRenderer) {
+      sceneRefs.tilesRenderer.setResolutionFromRenderer(camera, renderer);
+    }
   }
 
   const clock = new THREE.Clock();
@@ -2923,8 +3392,14 @@ async function main() {
   robots.turtlebot3.groundOffset = turtlebot3Spec.wheelRadius - turtlebotWheelCenterHeight;
   motionState.groundOffset = activeRobot.groundOffset;
   turtlebot3Rig.root.visible = false;
-  plannerState.start = worldToMapPoint(activeRobot.root.position);
-  setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
+  if (appMode === "tiles") {
+    plannerState.start = null;
+    startMarker.visible = false;
+    goalMarker.visible = false;
+  } else {
+    plannerState.start = worldToMapPoint(activeRobot.root.position);
+    setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
+  }
 
   function animate() {
     const delta = Math.min(clock.getDelta(), 0.05);
@@ -2948,237 +3423,42 @@ async function main() {
     }
 
     if (plannerState.autoActive) {
-      const currentPoint = { x: motionState.x, z: motionState.z };
+      const followerModule = plannerState.followerKey ? followerModules[plannerState.followerKey] : null;
+      if (followerModule && plannerState.followerState) {
+        const followerResult = followerModule.step({
+          plannerState,
+          motionState,
+          activeRobot,
+          obstacleBounds,
+          delta,
+          turnSpeed,
+          autoNavSpeed,
+          sprintSpeed,
+          halfWidth,
+          halfHeight,
+          autoCommandState,
+          resolveMotionWithSteps,
+          projectPointOntoPath,
+          samplePathAtProgress,
+        });
 
-      if (activeRobot.type === "go2" && plannerState.path && plannerState.polylineMetrics) {
-        const goalPoint = plannerState.path[plannerState.path.length - 1];
-        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
-
-        if (plannerState.autoSegmentIndex >= plannerState.path.length && goalDistance < 0.12) {
+        if (followerResult?.done) {
           plannerState.start = worldToMapPoint(activeRobot.root.position);
           setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
-          stopAutoNav("Goal reached.");
-        } else {
-          const targetIndex = Math.min(plannerState.autoSegmentIndex, plannerState.path.length - 1);
-          const isEntrySegment =
-            plannerState.autoEntryPoint && targetIndex === plannerState.autoEntryTargetIndex;
-          const previousPoint = isEntrySegment
-            ? plannerState.autoEntryPoint
-            : plannerState.path[Math.max(0, targetIndex - 1)];
-          const targetPoint = plannerState.path[targetIndex];
-          const toTargetX = targetPoint.x - motionState.x;
-          const toTargetZ = targetPoint.z - motionState.z;
-          const waypointDistance = Math.hypot(toTargetX, toTargetZ);
-          const isFinalWaypoint = targetIndex === plannerState.path.length - 1;
-          const segmentYaw = Math.atan2(
-            -(targetPoint.z - previousPoint.z),
-            targetPoint.x - previousPoint.x
-          );
-          const nextSegmentYaw = !isFinalWaypoint
-            ? Math.atan2(
-                -(plannerState.path[targetIndex + 1].z - targetPoint.z),
-                plannerState.path[targetIndex + 1].x - targetPoint.x
-              )
-            : segmentYaw;
-          const alignThreshold = 0.035;
-          const turnThreshold = 0.04;
-          const reachedWaypoint = waypointDistance < 0.04;
-
-          directAutoMotion = true;
-          turnInput = 0;
-          forwardInput = 0;
-          lateralInput = 0;
-
-          if (plannerState.autoSegmentPhase === "startAlign") {
-            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
-            const startYaw = Math.atan2(-(startPoint.z - motionState.z), startPoint.x - motionState.x);
-            const yawDelta = shortestAngleDelta(startYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
-            directAutoSpeed = 0.42;
-
-            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = startYaw;
-              plannerState.autoSegmentPhase = "startMove";
-            }
-          } else if (plannerState.autoSegmentPhase === "startMove") {
-            const startPoint = plannerState.autoEntryPoint ?? plannerState.path[0];
-            const toStartX = startPoint.x - motionState.x;
-            const toStartZ = startPoint.z - motionState.z;
-            const startDistance = Math.hypot(toStartX, toStartZ);
-            const moveSpeed = autoNavSpeed * clamp(startDistance / 0.45, 0.22, 0.72);
-            const moveDistance = Math.min(moveSpeed * delta, startDistance);
-            const dirX = toStartX / Math.max(startDistance, 1e-6);
-            const dirZ = toStartZ / Math.max(startDistance, 1e-6);
-            const targetX = clamp(motionState.x + dirX * moveDistance, -halfWidth, halfWidth);
-            const targetZ = clamp(motionState.z + dirZ * moveDistance, -halfHeight, halfHeight);
-            const resolved = resolveMotionWithSteps(
-              targetX,
-              targetZ,
-              motionState.x,
-              motionState.z,
-              motionState.supportY,
-              activeRobot.collisionRadius,
-              activeRobot.stepHeight,
-              obstacleBounds
-            );
-            motionState.x = resolved.x;
-            motionState.z = resolved.z;
-            if (motionState.isGrounded) {
-              motionState.supportY = resolved.supportY;
-            }
-            forwardInput = 0.36;
-            poseForwardInput = 0.78;
-            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.52, 0.72);
-
-            if (startDistance < 0.04 || moveDistance >= startDistance - 1e-6) {
-              motionState.x = startPoint.x;
-              motionState.z = startPoint.z;
-              plannerState.autoSegmentIndex = plannerState.autoEntryTargetIndex;
-              plannerState.autoSegmentPhase = "align";
-              forwardInput = 0;
-            }
-          } else if (plannerState.autoSegmentPhase === "align") {
-            const yawDelta = shortestAngleDelta(segmentYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.82;
-            directAutoSpeed = 0.42;
-
-            if (Math.abs(yawDelta) < alignThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = segmentYaw;
-              plannerState.autoSegmentPhase = "move";
-            }
-          } else if (plannerState.autoSegmentPhase === "move") {
-            const segmentDx = targetPoint.x - previousPoint.x;
-            const segmentDz = targetPoint.z - previousPoint.z;
-            const segmentLength = Math.hypot(segmentDx, segmentDz);
-            autoMoveDirection = {
-              x: segmentDx / Math.max(segmentLength, 1e-6),
-              z: segmentDz / Math.max(segmentLength, 1e-6),
-            };
-            const moveSpeed = autoNavSpeed * clamp(waypointDistance / 0.45, 0.22, 0.72);
-            const moveDistance = Math.min(moveSpeed * delta, waypointDistance);
-            const targetX = clamp(motionState.x + autoMoveDirection.x * moveDistance, -halfWidth, halfWidth);
-            const targetZ = clamp(motionState.z + autoMoveDirection.z * moveDistance, -halfHeight, halfHeight);
-            const resolved = resolveMotionWithSteps(
-              targetX,
-              targetZ,
-              motionState.x,
-              motionState.z,
-              motionState.supportY,
-              activeRobot.collisionRadius,
-              activeRobot.stepHeight,
-              obstacleBounds
-            );
-            motionState.x = resolved.x;
-            motionState.z = resolved.z;
-            if (motionState.isGrounded) {
-              motionState.supportY = resolved.supportY;
-            }
-            forwardInput = 0.36;
-            poseForwardInput = 0.82;
-            directAutoSpeed = clamp(moveSpeed / sprintSpeed, 0.56, 0.76);
-
-            if (reachedWaypoint || moveDistance >= waypointDistance - 1e-6) {
-              motionState.x = targetPoint.x;
-              motionState.z = targetPoint.z;
-              if (isEntrySegment) {
-                plannerState.autoEntryPoint = null;
-              }
-              if (isFinalWaypoint) {
-                plannerState.autoSegmentIndex = plannerState.path.length;
-                forwardInput = 0;
-                autoMoveDirection = null;
-              } else {
-                plannerState.autoSegmentPhase = "turn";
-                forwardInput = 0;
-                autoMoveDirection = null;
-              }
-            }
-          } else if (plannerState.autoSegmentPhase === "turn") {
-            const yawDelta = shortestAngleDelta(nextSegmentYaw, motionState.yaw);
-            const yawStep = clamp(yawDelta, -turnSpeed * 0.62 * delta, turnSpeed * 0.62 * delta);
-            motionState.yaw += yawStep;
-            turnInput = clamp(yawStep / Math.max(turnSpeed * delta, 1e-6), -0.62, 0.62);
-            poseTurnInput = Math.sign(yawDelta || 1) * 0.88;
-            directAutoSpeed = 0.48;
-
-            if (Math.abs(yawDelta) < turnThreshold || Math.abs(yawStep - yawDelta) < 1e-4) {
-              motionState.yaw = nextSegmentYaw;
-              plannerState.autoSegmentIndex += 1;
-              plannerState.autoSegmentPhase = "move";
-            }
+          stopAutoNav(followerResult.statusText ?? "Goal reached.");
+        } else if (followerResult?.command) {
+          directAutoMotion = followerResult.command.directAutoMotion ?? false;
+          directAutoSpeed = followerResult.command.directAutoSpeed ?? directAutoSpeed;
+          forwardInput = followerResult.command.forwardInput ?? forwardInput;
+          lateralInput = followerResult.command.lateralInput ?? lateralInput;
+          turnInput = followerResult.command.turnInput ?? turnInput;
+          poseForwardInput = followerResult.command.poseForwardInput ?? forwardInput;
+          poseLateralInput = followerResult.command.poseLateralInput ?? lateralInput;
+          poseTurnInput = followerResult.command.poseTurnInput ?? turnInput;
+          autoMoveDirection = followerResult.command.autoMoveDirection ?? autoMoveDirection;
+          if (typeof followerResult.command.currentMoveSpeed === "number") {
+            currentMoveSpeed = followerResult.command.currentMoveSpeed;
           }
-        }
-      } else if (
-        activeRobot.type === "turtlebot3" &&
-        plannerState.smoothPath &&
-        plannerState.smoothPathMetrics
-      ) {
-        const projection = projectPointOntoPath(
-          currentPoint,
-          plannerState.smoothPath,
-          plannerState.smoothPathMetrics
-        );
-        plannerState.pathProgress = Math.max(plannerState.pathProgress, projection.progress);
-
-        const remaining = plannerState.smoothPathMetrics.totalLength - plannerState.pathProgress;
-        const goalPoint = plannerState.smoothPath[plannerState.smoothPath.length - 1];
-        const goalDistance = Math.hypot(goalPoint.x - motionState.x, goalPoint.z - motionState.z);
-
-        if (remaining < 0.08 && goalDistance < 0.12) {
-          plannerState.start = worldToMapPoint(activeRobot.root.position);
-          setMarkerPosition(startMarker, plannerState.start, motionState.supportY);
-          stopAutoNav("Goal reached.");
-        } else {
-          const lookAhead = clamp(0.34 + projection.distance * 1.15, 0.28, 0.7);
-          const targetProgress = clamp(
-            plannerState.pathProgress + lookAhead,
-            0,
-            plannerState.smoothPathMetrics.totalLength
-          );
-          const targetPoint = samplePathAtProgress(
-            plannerState.smoothPath,
-            plannerState.smoothPathMetrics,
-            targetProgress
-          );
-          const toTargetX = targetPoint.x - motionState.x;
-          const toTargetZ = targetPoint.z - motionState.z;
-          const targetYaw = Math.atan2(-toTargetZ, toTargetX);
-          const yawDelta = shortestAngleDelta(targetYaw, motionState.yaw);
-
-          const desiredTurn = clamp(yawDelta * 1.5, -0.62, 0.62);
-          const headingAbs = Math.abs(yawDelta);
-          let desiredForward = 0.44;
-          if (headingAbs > 0.75) {
-            desiredForward = 0;
-          } else if (headingAbs > 0.4) {
-            desiredForward = 0.12;
-          }
-
-          const speedScale =
-            goalDistance < 0.45
-              ? clamp(goalDistance / 0.45, 0.16, 1)
-              : clamp(1 - projection.distance * 0.95, 0.35, 1);
-          const desiredSpeed = autoNavSpeed * speedScale;
-
-          const maxForwardDelta = 0.8 * delta;
-          const maxTurnDelta = 1.15 * delta;
-          const maxSpeedDelta = 0.52 * delta;
-
-          autoCommandState.forward = moveTowards(autoCommandState.forward, desiredForward, maxForwardDelta);
-          autoCommandState.lateral = moveTowards(autoCommandState.lateral, 0, maxForwardDelta);
-          autoCommandState.turn = moveTowards(autoCommandState.turn, desiredTurn, maxTurnDelta);
-          autoCommandState.speed = moveTowards(autoCommandState.speed, desiredSpeed, maxSpeedDelta);
-
-          turnInput = autoCommandState.turn;
-          forwardInput = autoCommandState.forward;
-          lateralInput = 0;
-          currentMoveSpeed = autoCommandState.speed;
         }
       }
     }
@@ -3187,11 +3467,45 @@ async function main() {
       lateralInput = 0;
     }
 
+    if (modeState.mapMode === "tiles3d" && !modeState.tilesSpawned) {
+      turnInput = 0;
+      forwardInput = 0;
+      lateralInput = 0;
+      poseForwardInput = 0;
+      poseLateralInput = 0;
+      poseTurnInput = 0;
+    }
+
     if (!directAutoMotion) {
       motionState.yaw += turnInput * turnSpeed * delta;
 
       if (autoMoveDirection) {
         moveDirection.set(autoMoveDirection.x, 0, autoMoveDirection.z);
+      } else if (modeState.mapMode === "tiles3d" && modeState.tilesFrame && modeState.tilesSpawned) {
+        syncActiveRobotTransform();
+        robotForwardWorld
+          .set(1, 0, 0)
+          .applyQuaternion(activeRobot.root.quaternion)
+          .projectOnPlane(getTilesUpAxis());
+        robotRightWorld
+          .set(0, 0, 1)
+          .applyQuaternion(activeRobot.root.quaternion)
+          .projectOnPlane(getTilesUpAxis());
+        if (robotForwardWorld.lengthSq() > 1e-8) {
+          robotForwardWorld.normalize();
+        }
+        if (robotRightWorld.lengthSq() > 1e-8) {
+          robotRightWorld.normalize();
+        }
+        moveDirection.set(
+          robotForwardWorld.dot(modeState.tilesFrame.east) * forwardInput +
+            robotRightWorld.dot(modeState.tilesFrame.east) * lateralInput,
+          0,
+          robotForwardWorld.dot(modeState.tilesFrame.north) * forwardInput +
+            robotRightWorld.dot(modeState.tilesFrame.north) * lateralInput
+        );
+      } else if (modeState.mapMode === "tiles3d") {
+        moveDirection.set(0, 0, 0);
       } else {
         moveDirection.set(
           Math.cos(motionState.yaw) * forwardInput + Math.sin(motionState.yaw) * lateralInput,
@@ -3210,37 +3524,50 @@ async function main() {
     } else if (moveDirection.lengthSq() > 0) {
       moveDirection.normalize();
       normalizedSpeed = currentMoveSpeed / sprintSpeed;
-      const targetX = clamp(motionState.x + moveDirection.x * currentMoveSpeed * delta, -halfWidth, halfWidth);
-      const targetZ = clamp(motionState.z + moveDirection.z * currentMoveSpeed * delta, -halfHeight, halfHeight);
+      const rawTargetX = motionState.x + moveDirection.x * currentMoveSpeed * delta;
+      const rawTargetZ = motionState.z + moveDirection.z * currentMoveSpeed * delta;
+      const targetX = modeState.mapMode === "tiles3d" ? rawTargetX : clamp(rawTargetX, -halfWidth, halfWidth);
+      const targetZ = modeState.mapMode === "tiles3d" ? rawTargetZ : clamp(rawTargetZ, -halfHeight, halfHeight);
       const effectiveStepHeight =
         activeRobot.stepHeight +
         (motionState.isGrounded ? 0 : jumpStepBonus) +
         clamp(motionState.jumpY * 0.45, 0, 0.16);
 
-      const resolved = resolveMotionWithSteps(
-        targetX,
-        targetZ,
-        motionState.x,
-        motionState.z,
-        motionState.supportY,
-        activeRobot.collisionRadius,
-        effectiveStepHeight,
-        obstacleBounds
-      );
+      const resolved = modeState.mapMode === "tiles3d"
+        ? resolveTilesMotion(
+          targetX,
+          targetZ,
+          motionState.x,
+          motionState.z,
+          motionState.supportY,
+          activeRobot.collisionRadius
+        )
+        : resolveMotionWithSteps(
+          targetX,
+          targetZ,
+          motionState.x,
+          motionState.z,
+          motionState.supportY,
+          activeRobot.collisionRadius,
+          effectiveStepHeight,
+          obstacleBounds
+        );
       motionState.x = resolved.x;
       motionState.z = resolved.z;
       if (motionState.isGrounded) {
         motionState.supportY = resolved.supportY;
       }
     } else if (motionState.isGrounded) {
-      motionState.supportY = evaluateSupportSurface(
-        motionState.x,
-        motionState.z,
-        activeRobot.collisionRadius,
-        motionState.supportY,
-        activeRobot.stepHeight,
-        obstacleBounds
-      ).supportY;
+      motionState.supportY = modeState.mapMode === "tiles3d"
+        ? (findTilesSupportY(motionState.x, motionState.z, motionState.supportY) ?? motionState.supportY)
+        : evaluateSupportSurface(
+          motionState.x,
+          motionState.z,
+          activeRobot.collisionRadius,
+          motionState.supportY,
+          activeRobot.stepHeight,
+          obstacleBounds
+        ).supportY;
     }
 
     if (!motionState.isGrounded || motionState.jumpY > 0) {
@@ -3248,14 +3575,16 @@ async function main() {
       motionState.jumpY += motionState.velocityY * delta;
 
       if (motionState.jumpY <= 0) {
-        motionState.supportY = evaluateSupportSurface(
-          motionState.x,
-          motionState.z,
-          activeRobot.collisionRadius,
-          Math.max(motionState.supportY, activeRobot.stepHeight),
-          Number.POSITIVE_INFINITY,
-          obstacleBounds
-        ).supportY;
+        motionState.supportY = modeState.mapMode === "tiles3d"
+          ? (findTilesSupportY(motionState.x, motionState.z, motionState.supportY) ?? motionState.supportY)
+          : evaluateSupportSurface(
+            motionState.x,
+            motionState.z,
+            activeRobot.collisionRadius,
+            Math.max(motionState.supportY, activeRobot.stepHeight),
+            Number.POSITIVE_INFINITY,
+            obstacleBounds
+          ).supportY;
         motionState.jumpY = 0;
         motionState.velocityY = 0;
         motionState.isGrounded = true;
@@ -3264,12 +3593,9 @@ async function main() {
 
     const crouchOffset = inputState.sneak ? -0.08 : 0;
     const idleBob = 0;
-    activeRobot.root.position.set(
-      motionState.x,
-      motionState.groundOffset + motionState.supportY + motionState.jumpY + idleBob + crouchOffset,
-      motionState.z
-    );
-    activeRobot.root.rotation.y = motionState.yaw;
+    motionState.groundOffset = activeRobot.groundOffset + idleBob + crouchOffset;
+    syncActiveRobotTransform();
+    motionState.groundOffset = activeRobot.groundOffset;
 
     if (activeRobot.type === "go2") {
       updateGo2Pose(go2Rig, motionState, elapsed, {
@@ -3297,30 +3623,58 @@ async function main() {
     }
 
     scanRing.scale.setScalar(pulse);
-    scanRing.position.set(activeRobot.root.position.x, 0, activeRobot.root.position.z);
+    scanRing.position.copy(activeRobot.root.position);
+    if (modeState.mapMode === "tiles3d" && modeState.tilesFrame) {
+      const ringQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), modeState.tilesFrame.up);
+      scanRing.quaternion.copy(ringQuat);
+      scanRing.position.addScaledVector(modeState.tilesFrame.up, -motionState.groundOffset * 0.92);
+    } else {
+      scanRing.rotation.set(0, 0, 0);
+      scanRing.position.y = 0;
+    }
 
+    const currentUp = getCurrentUpAxis();
+    camera.up.copy(currentUp);
     const horizontalRadius = Math.cos(orbitState.polar) * orbitState.distance;
     const verticalOffset = Math.sin(orbitState.polar) * orbitState.distance;
     chaseOffset.set(-horizontalRadius, verticalOffset, 0);
     if (editorState.isOpen || cameraState.mode === "free") {
-      chaseOffset.applyAxisAngle(upAxis, orbitState.azimuth);
+      chaseOffset.applyAxisAngle(currentUp, orbitState.azimuth);
       chasePosition.copy(orbitState.target).add(chaseOffset);
       camera.position.lerp(chasePosition, 0.18);
       chaseLookAt.copy(orbitState.target);
     } else {
       const cameraYaw = motionState.yaw + orbitState.azimuth;
-      chaseOffset.applyAxisAngle(upAxis, cameraYaw);
+      chaseOffset.applyAxisAngle(currentUp, cameraYaw);
       chasePosition.copy(activeRobot.root.position).add(chaseOffset);
       camera.position.lerp(chasePosition, 0.12);
-      chaseLookAt.set(
-        activeRobot.root.position.x,
-        activeRobot.root.position.y + 0.28 + motionState.jumpY * 0.18 + crouchOffset * 0.3,
-        activeRobot.root.position.z
-      );
+      const lookForward = new THREE.Vector3();
+      if (modeState.mapMode === "tiles3d" && modeState.tilesFrame) {
+        lookForward
+          .copy(modeState.tilesFrame.east)
+          .multiplyScalar(Math.cos(motionState.yaw))
+          .addScaledVector(modeState.tilesFrame.north, -Math.sin(motionState.yaw))
+          .normalize();
+      } else {
+        lookForward.set(Math.cos(motionState.yaw), 0, -Math.sin(motionState.yaw));
+      }
+      chaseLookAt.copy(activeRobot.root.position);
+      chaseLookAt.addScaledVector(lookForward, modeState.mapMode === "tiles3d" ? 0.15 : 0.55);
+      chaseLookAt.addScaledVector(currentUp, modeState.mapMode === "tiles3d" ? 0.18 : 0.42 + motionState.jumpY * 0.25 + crouchOffset * 0.3);
     }
     camera.lookAt(chaseLookAt);
 
     syncPoseToHud();
+    syncPositionPanel();
+
+    if (modeState.mapMode === "tiles3d" && sceneRefs.tilesRenderer) {
+      camera.updateMatrixWorld();
+      if (tilesRefreshFrames > 0) {
+        sceneRefs.tilesRenderer.setResolutionFromRenderer(camera, renderer);
+        tilesRefreshFrames -= 1;
+      }
+      sceneRefs.tilesRenderer.update();
+    }
 
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
@@ -3329,5 +3683,3 @@ async function main() {
   window.addEventListener("resize", resize);
   animate();
 }
-
-main();
