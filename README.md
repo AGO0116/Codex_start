@@ -34,6 +34,9 @@ WebGLで動いており、ブラウザベースで使用できます。
 ### 3D都市モデル上での操作
 <img width="1915" height="935" alt="image" src="https://github.com/user-attachments/assets/9b8c0a43-707b-432c-84e2-7a439201856a" />
 
+### 3D都市モデル上での経路計画アルゴリズム検証
+<img width="1906" height="856" alt="image" src="https://github.com/user-attachments/assets/1a8bab16-05a1-4c0d-a218-5b5baf1eab97" />
+
 
 ## 主な機能
 
